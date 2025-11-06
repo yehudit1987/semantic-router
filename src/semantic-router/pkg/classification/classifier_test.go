@@ -2929,13 +2929,11 @@ func createMockModelFile(t *testing.T, dir, filename string) {
 
 func TestAutoDiscoverModels_RealModels(t *testing.T) {
 	// Test with real models directory
-	modelsDir := "../../../../../models"
+	modelsDir := "../../../../models"
 
 	paths, err := AutoDiscoverModels(modelsDir)
 	if err != nil {
-		// Skip this test in environments without the real models directory
-		t.Logf("AutoDiscoverModels() failed in real-models test: %v", err)
-		t.Skip("Skipping real-models discovery test because models directory is unavailable")
+		t.Fatalf("AutoDiscoverModels() failed: %v (models directory should exist at %s)", err, modelsDir)
 	}
 
 	t.Logf("Discovered paths:")
@@ -2984,10 +2982,9 @@ func TestAutoDiscoverModels_RealModels(t *testing.T) {
 // TestAutoInitializeUnifiedClassifier tests the full initialization process
 func TestAutoInitializeUnifiedClassifier(t *testing.T) {
 	// Test with real models directory
-	classifier, err := AutoInitializeUnifiedClassifier("../../../../../models")
+	classifier, err := AutoInitializeUnifiedClassifier("../../../../models")
 	if err != nil {
-		t.Logf("AutoInitializeUnifiedClassifier() failed in real-models test: %v", err)
-		t.Skip("Skipping unified classifier init test because real models are unavailable")
+		t.Fatalf("AutoInitializeUnifiedClassifier() failed: %v (models directory should exist at ../../../../models)", err)
 	}
 
 	if classifier == nil {
@@ -3319,32 +3316,37 @@ func BenchmarkUnifiedClassifier_SingleVsBatch(b *testing.B) {
 // Global classifier instance for integration tests to avoid repeated initialization
 var (
 	globalTestClassifier     *UnifiedClassifier
+	globalTestClassifierErr  error
 	globalTestClassifierOnce sync.Once
 )
 
 // getTestClassifier returns a shared classifier instance for all integration tests
-func getTestClassifier(t *testing.T) *UnifiedClassifier {
+func getTestClassifier(t *testing.T) (*UnifiedClassifier, error) {
 	globalTestClassifierOnce.Do(func() {
-		classifier, err := AutoInitializeUnifiedClassifier("../../../../../models")
+		classifier, err := AutoInitializeUnifiedClassifier("../../../../models")
 		if err != nil {
-			t.Logf("Failed to initialize classifier: %v", err)
+			globalTestClassifierErr = err
 			return
 		}
 		if classifier != nil && classifier.IsInitialized() {
 			globalTestClassifier = classifier
 			t.Logf("Global test classifier initialized successfully")
+		} else {
+			globalTestClassifierErr = fmt.Errorf("classifier is nil or not initialized")
 		}
 	})
-	return globalTestClassifier
+	return globalTestClassifier, globalTestClassifierErr
 }
 
 // Integration Tests - These require actual models to be available
 func TestUnifiedClassifier_Integration(t *testing.T) {
 	// Get shared classifier instance
-	classifier := getTestClassifier(t)
+	classifier, err := getTestClassifier(t)
+	if err != nil {
+		t.Fatalf("Failed to initialize classifier: %v", err)
+	}
 	if classifier == nil {
-		t.Skip("Skipping integration tests - classifier not available")
-		return
+		t.Fatal("Classifier is nil despite no error - this should not happen")
 	}
 
 	t.Run("RealBatchClassification", func(t *testing.T) {
@@ -3489,28 +3491,32 @@ func TestUnifiedClassifier_Integration(t *testing.T) {
 }
 
 // getBenchmarkClassifier returns a shared classifier instance for benchmarks
-func getBenchmarkClassifier(b *testing.B) *UnifiedClassifier {
+func getBenchmarkClassifier(b *testing.B) (*UnifiedClassifier, error) {
 	// Reuse the global test classifier for benchmarks
 	globalTestClassifierOnce.Do(func() {
-		classifier, err := AutoInitializeUnifiedClassifier("../../../../../models")
+		classifier, err := AutoInitializeUnifiedClassifier("../../../../models")
 		if err != nil {
-			b.Logf("Failed to initialize classifier: %v", err)
+			globalTestClassifierErr = err
 			return
 		}
 		if classifier != nil && classifier.IsInitialized() {
 			globalTestClassifier = classifier
 			b.Logf("Global benchmark classifier initialized successfully")
+		} else {
+			globalTestClassifierErr = fmt.Errorf("classifier is nil or not initialized")
 		}
 	})
-	return globalTestClassifier
+	return globalTestClassifier, globalTestClassifierErr
 }
 
 // Performance benchmarks with real models
 func BenchmarkUnifiedClassifier_RealModels(b *testing.B) {
-	classifier := getBenchmarkClassifier(b)
+	classifier, err := getBenchmarkClassifier(b)
+	if err != nil {
+		b.Fatalf("Failed to initialize classifier for benchmark: %v", err)
+	}
 	if classifier == nil {
-		b.Skip("Skipping benchmark - classifier not available")
-		return
+		b.Fatal("Classifier is nil despite no error - this should not happen")
 	}
 
 	texts := []string{
@@ -3530,10 +3536,12 @@ func BenchmarkUnifiedClassifier_RealModels(b *testing.B) {
 }
 
 func BenchmarkUnifiedClassifier_BatchSizeComparison(b *testing.B) {
-	classifier := getBenchmarkClassifier(b)
+	classifier, err := getBenchmarkClassifier(b)
+	if err != nil {
+		b.Fatalf("Failed to initialize classifier for benchmark: %v", err)
+	}
 	if classifier == nil {
-		b.Skip("Skipping benchmark - classifier not available")
-		return
+		b.Fatal("Classifier is nil despite no error - this should not happen")
 	}
 
 	baseText := "What is artificial intelligence and machine learning?"

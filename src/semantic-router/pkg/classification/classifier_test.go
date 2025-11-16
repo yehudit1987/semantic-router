@@ -21,6 +21,11 @@ import (
 	mcpclient "github.com/vllm-project/semantic-router/src/semantic-router/pkg/mcp"
 )
 
+// Test constants
+const (
+	testModelsDir = "../../../../models"
+)
+
 func TestClassifier(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Classifier Suite")
@@ -2909,11 +2914,11 @@ func createMockModelFile(t *testing.T, dir, filename string) {
 
 func TestAutoDiscoverModels_RealModels(t *testing.T) {
 	// Test with real models directory
-	modelsDir := "../../../../models"
+	modelsDir := testModelsDir
 
 	paths, err := AutoDiscoverModels(modelsDir)
 	if err != nil {
-		t.Fatalf("AutoDiscoverModels() failed: %v (models directory should exist at %s)", err, modelsDir)
+		t.Fatalf("AutoDiscoverModels() failed: %v (models directory should exist at %s)", err, testModelsDir)
 	}
 
 	t.Logf("Discovered paths:")
@@ -2962,9 +2967,9 @@ func TestAutoDiscoverModels_RealModels(t *testing.T) {
 // TestAutoInitializeUnifiedClassifier tests the full initialization process
 func TestAutoInitializeUnifiedClassifier(t *testing.T) {
 	// Test with real models directory
-	classifier, err := AutoInitializeUnifiedClassifier("../../../../models")
+	classifier, err := AutoInitializeUnifiedClassifier(testModelsDir)
 	if err != nil {
-		t.Fatalf("AutoInitializeUnifiedClassifier() failed: %v (models directory should exist at ../../../../models)", err)
+		t.Fatalf("AutoInitializeUnifiedClassifier() failed: %v (models directory should exist at %s)", err, testModelsDir)
 	}
 
 	if classifier == nil {
@@ -3302,7 +3307,7 @@ var (
 // getTestClassifier returns a shared classifier instance for all integration tests
 func getTestClassifier(t *testing.T) *UnifiedClassifier {
 	globalTestClassifierOnce.Do(func() {
-		classifier, err := AutoInitializeUnifiedClassifier("../../../../models")
+		classifier, err := AutoInitializeUnifiedClassifier(testModelsDir)
 		if err != nil {
 			t.Logf("Failed to initialize classifier: %v", err)
 			return
@@ -3472,7 +3477,7 @@ func TestUnifiedClassifier_Integration(t *testing.T) {
 func getBenchmarkClassifier(b *testing.B) *UnifiedClassifier {
 	// Reuse the global test classifier for benchmarks
 	globalTestClassifierOnce.Do(func() {
-		classifier, err := AutoInitializeUnifiedClassifier("../../../../../models")
+		classifier, err := AutoInitializeUnifiedClassifier(testModelsDir)
 		if err != nil {
 			b.Logf("Failed to initialize classifier: %v", err)
 			return

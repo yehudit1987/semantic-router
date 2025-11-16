@@ -9,7 +9,7 @@ on:
 
 jobs:
   test-and-build:
-    if: github.repository == 'vllm-project/semantic-router'
+    # if: github.repository == 'vllm-project/semantic-router'
     runs-on: ubuntu-latest
 
     steps:
@@ -62,9 +62,9 @@ jobs:
         with:
           path: |
             models/
-          key: ${{ runner.os }}-models-v2-${{ hashFiles('tools/make/models.mk') }}
+          key: ${{ runner.os }}-models-v1-${{ hashFiles('tools/make/models.mk') }}
           restore-keys: |
-            ${{ runner.os }}-models-v2-
+            ${{ runner.os }}-models-v1-
         continue-on-error: true # Don't fail the job if caching fails
 
       - name: Check go mod tidy

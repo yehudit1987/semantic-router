@@ -10,9 +10,11 @@ import (
 	"github.com/vllm-project/semantic-router/e2e/pkg/banner"
 	"github.com/vllm-project/semantic-router/e2e/pkg/framework"
 	aigateway "github.com/vllm-project/semantic-router/e2e/profiles/ai-gateway"
+	aibrix "github.com/vllm-project/semantic-router/e2e/profiles/aibrix"
 
 	// Import profiles to register test cases
 	_ "github.com/vllm-project/semantic-router/e2e/profiles/ai-gateway"
+	_ "github.com/vllm-project/semantic-router/e2e/profiles/aibrix"
 )
 
 const version = "v1.0.0"
@@ -96,6 +98,8 @@ func getProfile(name string) (framework.Profile, error) {
 	switch name {
 	case "ai-gateway":
 		return aigateway.NewProfile(), nil
+	case "aibrix":
+		return aibrix.NewProfile(), nil
 	// Add more profiles here as they are implemented
 	// case "istio":
 	//     return istio.NewProfile(), nil

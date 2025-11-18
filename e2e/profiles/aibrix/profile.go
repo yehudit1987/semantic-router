@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -134,6 +135,10 @@ func (p *Profile) Setup(ctx context.Context, opts *framework.SetupOptions) error
 	p.log("Step 5/5: Verifying all components are ready")
 	if err := p.verifyEnvironment(ctx, opts); err != nil {
 		p.log("ERROR: Environment verification failed: %v", err)
+
+		// Collect pod logs for debugging before cleanup
+		p.collectDebugLogs(ctx, opts)
+
 		p.cleanupPartialDeployment(ctx, opts, semanticRouterDeployed, aibrixDepsDeployed, aibrixCoreDeployed, gatewayResourcesDeployed)
 		return fmt.Errorf("failed to verify environment: %w", err)
 	}
@@ -232,6 +237,27 @@ func (p *Profile) deployAIBrixCore(ctx context.Context, opts *framework.SetupOpt
 		return fmt.Errorf("failed to apply AIBrix core: %w", err)
 	}
 
+	// Patch aibrix-gateway-plugins to reduce resource requests for CI environments
+	// The default requests (2 CPU, 8Gi memory) are too high for GitHub Actions runners
+	p.log("Patching aibrix-gateway-plugins resource requests for CI compatibility...")
+	patchCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", opts.KubeConfig,
+		"patch", "deployment", deploymentAIBrixGatewayPlugins,
+		"-n", namespaceAIBrix,
+		"--type", "json",
+		"-p", `[
+			{"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/cpu", "value": "500m"},
+			{"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/memory", "value": "1Gi"},
+			{"op": "replace", "path": "/spec/template/spec/containers/0/resources/limits/cpu", "value": "1"},
+			{"op": "replace", "path": "/spec/template/spec/containers/0/resources/limits/memory", "value": "2Gi"}
+		]`)
+	if p.verbose {
+		patchCmd.Stdout = os.Stdout
+		patchCmd.Stderr = os.Stderr
+	}
+	if err := patchCmd.Run(); err != nil {
+		p.log("Warning: Failed to patch resource requests (proceeding anyway): %v", err)
+	}
+
 	// Wait for AIBrix core components to be ready
 	deployments := []struct {
 		namespace string
@@ -266,6 +292,12 @@ func (p *Profile) deployGatewayResources(ctx context.Context, opts *framework.Se
 	// Apply gateway API resources
 	if err := p.kubectlApply(ctx, opts.KubeConfig, "deploy/kubernetes/aibrix/aigw-resources/gwapi-resources.yaml"); err != nil {
 		return fmt.Errorf("failed to apply gateway API resources: %w", err)
+	}
+
+	// Wait for AIBrix gateway plugins to reconcile with new Gateway resources
+	p.log("Waiting for AIBrix gateway plugins to reconcile with Gateway resources...")
+	if err := p.waitForDeployment(ctx, opts, namespaceAIBrix, deploymentAIBrixGatewayPlugins, timeoutComponentDeploy); err != nil {
+		return fmt.Errorf("aibrix-gateway-plugins not ready after gateway resources: %w", err)
 	}
 
 	return nil
@@ -442,6 +474,84 @@ func (p *Profile) runKubectl(ctx context.Context, kubeConfig string, args ...str
 		cmd.Stderr = os.Stderr
 	}
 	return cmd.Run()
+}
+
+func (p *Profile) collectDebugLogs(ctx context.Context, opts *framework.SetupOptions) {
+	p.log("Collecting debug logs from failing pods...")
+
+	// First, list ALL pods in aibrix-system namespace to see what's there
+	p.log("--- All pods in %s namespace ---", namespaceAIBrix)
+	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", opts.KubeConfig,
+		"get", "pods", "-n", namespaceAIBrix, "-o", "wide")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		p.log("Failed to list pods in %s: %v", namespaceAIBrix, err)
+	} else {
+		fmt.Printf("%s\n", output)
+	}
+
+	// Get deployment details to see replica status
+	deployments := []struct {
+		namespace string
+		name      string
+	}{
+		{namespaceAIBrix, deploymentAIBrixGatewayPlugins},
+		{namespaceAIBrix, deploymentAIBrixMetadataService},
+		{namespaceAIBrix, deploymentAIBrixControllerManager},
+	}
+
+	for _, dep := range deployments {
+		p.log("--- Deployment %s/%s ---", dep.namespace, dep.name)
+
+		// Get deployment status
+		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", opts.KubeConfig,
+			"get", "deployment", "-n", dep.namespace, dep.name, "-o", "wide")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			p.log("Failed to get deployment %s: %v", dep.name, err)
+		} else {
+			fmt.Printf("%s\n", output)
+		}
+
+		// Get pods using deployment selector (more reliable than hardcoded label)
+		cmd = exec.CommandContext(ctx, "kubectl", "--kubeconfig", opts.KubeConfig,
+			"get", "pods", "-n", dep.namespace,
+			"--selector", fmt.Sprintf("app.kubernetes.io/name=%s", dep.name))
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			p.log("Failed to get pods for %s: %v", dep.name, err)
+		} else {
+			fmt.Printf("%s\n", output)
+		}
+
+		// Try getting logs with deployment selector
+		cmd = exec.CommandContext(ctx, "kubectl", "--kubeconfig", opts.KubeConfig,
+			"logs", "-n", dep.namespace,
+			"--selector", fmt.Sprintf("app.kubernetes.io/name=%s", dep.name),
+			"--tail=50", "--all-containers=true", "--prefix=true")
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			p.log("Failed to get logs for %s (might not have pods): %v", dep.name, err)
+		} else if len(output) > 0 {
+			fmt.Printf("%s\n", output)
+		}
+
+		// Describe deployment for events
+		cmd = exec.CommandContext(ctx, "kubectl", "--kubeconfig", opts.KubeConfig,
+			"describe", "deployment", "-n", dep.namespace, dep.name)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			p.log("Failed to describe deployment %s: %v", dep.name, err)
+		} else {
+			// Show last 50 lines for events
+			lines := strings.Split(string(output), "\n")
+			start := len(lines) - 50
+			if start < 0 {
+				start = 0
+			}
+			fmt.Printf("%s\n", strings.Join(lines[start:], "\n"))
+		}
+	}
 }
 
 func (p *Profile) log(format string, args ...interface{}) {

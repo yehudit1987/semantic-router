@@ -217,10 +217,56 @@ func (p *Profile) deploySemanticRouter(ctx context.Context, deployer *helm.Deplo
 	}
 
 	if err := deployer.Install(ctx, installOpts); err != nil {
+		// Debug: Print pod status and events on failure
+		p.log("Helm install failed, gathering debug info...")
+		p.debugKubernetesState(ctx, opts.KubeConfig, namespaceSemanticRouter)
 		return err
 	}
 
 	return deployer.WaitForDeployment(ctx, namespaceSemanticRouter, deploymentSemanticRouter, timeoutSemanticRouterDeploy)
+}
+
+// debugKubernetesState prints debug information about pods and events in a namespace
+func (p *Profile) debugKubernetesState(ctx context.Context, kubeConfig, namespace string) {
+	p.log("=== DEBUG: Pod status in namespace %s ===", namespace)
+
+	// Get pods
+	getPodsCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeConfig,
+		"get", "pods", "-n", namespace, "-o", "wide")
+	getPodsCmd.Stdout = os.Stdout
+	getPodsCmd.Stderr = os.Stderr
+	_ = getPodsCmd.Run()
+
+	// Get container logs (most important for crash debugging)
+	p.log("=== DEBUG: Container logs (current) ===")
+	logsCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeConfig,
+		"logs", "-n", namespace, "-l", "app=semantic-router", "--tail=100")
+	logsCmd.Stdout = os.Stdout
+	logsCmd.Stderr = os.Stderr
+	_ = logsCmd.Run()
+
+	p.log("=== DEBUG: Container logs (previous crashed instance) ===")
+	logsPrevCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeConfig,
+		"logs", "-n", namespace, "-l", "app=semantic-router", "--previous", "--tail=100")
+	logsPrevCmd.Stdout = os.Stdout
+	logsPrevCmd.Stderr = os.Stderr
+	_ = logsPrevCmd.Run()
+
+	// Describe pods
+	p.log("=== DEBUG: Pod descriptions ===")
+	describePodsCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeConfig,
+		"describe", "pods", "-n", namespace)
+	describePodsCmd.Stdout = os.Stdout
+	describePodsCmd.Stderr = os.Stderr
+	_ = describePodsCmd.Run()
+
+	// Get events
+	p.log("=== DEBUG: Events in namespace %s ===", namespace)
+	eventsCmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeConfig,
+		"get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
+	eventsCmd.Stdout = os.Stdout
+	eventsCmd.Stderr = os.Stderr
+	_ = eventsCmd.Run()
 }
 
 func (p *Profile) deployAIBrixDependencies(ctx context.Context, opts *framework.SetupOptions) error {
@@ -468,7 +514,7 @@ func (p *Profile) kubectlApply(ctx context.Context, kubeConfig, manifest string)
 }
 
 func (p *Profile) kubectlDelete(ctx context.Context, kubeConfig, manifest string) error {
-	return p.runKubectl(ctx, kubeConfig, "delete", "-f", manifest)
+	return p.runKubectl(ctx, kubeConfig, "delete", "--ignore-not-found", "-f", manifest)
 }
 
 func (p *Profile) runKubectl(ctx context.Context, kubeConfig string, args ...string) error {

@@ -181,7 +181,12 @@ func testSinglePluginChain(ctx context.Context, testCase PluginChainCase, localP
 
 	// Extract plugin execution headers
 	piiViolationHeader := resp.Header.Get("x-vsr-pii-violation")
-	result.PIIDetected = piiViolationHeader // Store for display purposes
+	piiTypesHeader := resp.Header.Get("x-vsr-pii-types")
+	if piiTypesHeader != "" {
+		result.PIIDetected = piiTypesHeader // Store detected PII types for display
+	} else {
+		result.PIIDetected = piiViolationHeader // Fallback to boolean
+	}
 	result.PIIBlocked = (resp.StatusCode == http.StatusForbidden || piiViolationHeader == "true")
 
 	// Check cache headers (x-vsr-cache-hit or similar)

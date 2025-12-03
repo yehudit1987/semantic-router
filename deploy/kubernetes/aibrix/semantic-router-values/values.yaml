@@ -53,7 +53,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -75,7 +85,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -97,7 +117,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "semantic-cache"
           configuration:
             enabled: true
@@ -146,7 +176,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -168,7 +208,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -190,8 +240,7 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed:
-              - "GPE"  # Allow - country/city names in general knowledge questions
+            pii_types_allowed: []  # Strict - block all PII for general/other queries
         - type: "semantic-cache"
           configuration:
             enabled: true
@@ -217,7 +266,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "semantic-cache"
           configuration:
             enabled: true
@@ -243,7 +302,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -265,7 +334,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -287,7 +366,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -309,7 +398,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -331,7 +430,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -353,7 +462,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -375,7 +494,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"
+              - "ORGANIZATION"
+              - "DATE_TIME"
+              - "GPE"
+              - "NRP"
+              - "STREET_ADDRESS"
+              - "AGE"
+              - "ZIP_CODE"
+              - "TITLE"
+              - "PHONE_NUMBER"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -433,11 +562,11 @@ config:
   # Classifier configuration
   classifier:
     category_model:
-      model_id: "models/lora_intent_classifier_bert-base-uncased_model"
-      use_modernbert: false  # Use LoRA intent classifier with auto-detection
+      model_id: "models/category_classifier_modernbert-base_model"
+      use_modernbert: true
       threshold: 0.6
       use_cpu: true
-      category_mapping_path: "models/lora_intent_classifier_bert-base-uncased_model/category_mapping.json"
+      category_mapping_path: "models/category_classifier_modernbert-base_model/category_mapping.json"
     pii_model:
       # Support both traditional (modernbert) and LoRA-based PII detection
       # When model_type is "auto", the system will auto-detect LoRA configuration
@@ -561,3 +690,18 @@ config:
         service_version: "v0.1.0"
         deployment_environment: "development"
 
+# Model downloads - use trained ModernBERT model
+initContainer:
+  models:
+    - name: Qwen3-Embedding-0.6B
+      repo: Qwen/Qwen3-Embedding-0.6B
+    - name: all-MiniLM-L12-v2
+      repo: sentence-transformers/all-MiniLM-L12-v2
+    - name: category_classifier_modernbert-base_model
+      repo: ykerido/category-classifier-modernbert-trained-v4
+    - name: pii_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_model
+    - name: jailbreak_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model
+    - name: pii_classifier_modernbert-base_presidio_token_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_presidio_token_model

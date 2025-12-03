@@ -47,14 +47,14 @@ config:
 
   classifier:
     category_model:
-      model_id: "models/lora_intent_classifier_bert-base-uncased_model"
-      use_modernbert: false  # Use LoRA intent classifier with auto-detection
+      model_id: "models/category_classifier_modernbert-base_model"
+      use_modernbert: true
       threshold: 0.6
       use_cpu: true
-      category_mapping_path: "models/lora_intent_classifier_bert-base-uncased_model/category_mapping.json"
+      category_mapping_path: "models/category_classifier_modernbert-base_model/category_mapping.json"
     pii_model:
-      model_id: "models/lora_pii_detector_bert-base-uncased_model"
-      use_modernbert: false  # Use LoRA PII model with auto-detection
+      model_id: "models/pii_classifier_modernbert-base_presidio_token_model"
+      use_modernbert: true
       threshold: 0.9
       use_cpu: true
       pii_mapping_path: "models/pii_classifier_modernbert-base_presidio_token_model/pii_type_mapping.json"
@@ -155,3 +155,18 @@ resources:
         service_version: "v0.1.0"
         deployment_environment: "development"
 
+# Model downloads - use trained ModernBERT model
+initContainer:
+  models:
+    - name: Qwen3-Embedding-0.6B
+      repo: Qwen/Qwen3-Embedding-0.6B
+    - name: all-MiniLM-L12-v2
+      repo: sentence-transformers/all-MiniLM-L12-v2
+    - name: category_classifier_modernbert-base_model
+      repo: ykerido/category-classifier-modernbert-trained-v4
+    - name: pii_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_model
+    - name: jailbreak_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model
+    - name: pii_classifier_modernbert-base_presidio_token_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_presidio_token_model

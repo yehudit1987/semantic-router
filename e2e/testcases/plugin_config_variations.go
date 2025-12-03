@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	pkgtestcases "github.com/vllm-project/semantic-router/e2e/pkg/testcases"
@@ -19,6 +21,12 @@ func init() {
 		Tags:        []string{"signal-decision", "plugin", "configuration"},
 		Fn:          testPluginConfigVariations,
 	})
+}
+
+// PluginConfigTestData represents the JSON file structure
+type PluginConfigTestData struct {
+	Description string             `json:"description"`
+	TestCases   []PluginConfigCase `json:"test_cases"`
 }
 
 // PluginConfigCase represents a test case for plugin configuration variations
@@ -55,56 +63,14 @@ func testPluginConfigVariations(ctx context.Context, client *kubernetes.Clientse
 	}
 	defer stopPortForward()
 
-	// Define test cases for different plugin configurations
-	testCases := []PluginConfigCase{
-		// Semantic cache threshold variations
-		{
-			Query:            "What is photosynthesis?",
-			ExpectedDecision: "biology_decision",
-			PluginType:       "semantic-cache",
-			ExpectedBehavior: "cache_miss", // First request
-			Description:      "First biology query should be cache miss",
-		},
-		{
-			Query:            "Explain the process of photosynthesis",
-			ExpectedDecision: "biology_decision",
-			PluginType:       "semantic-cache",
-			ExpectedBehavior: "cache_hit_possible", // Similar query, might hit
-			Description:      "Similar biology query might hit cache depending on threshold",
-		},
-		// Psychology with high cache threshold (0.92)
-		{
-			Query:            "What is cognitive behavioral therapy?",
-			ExpectedDecision: "psychology_decision",
-			PluginType:       "semantic-cache",
-			ExpectedBehavior: "cache_miss",
-			CacheSimilarity:  0.92,
-			Description:      "Psychology query with strict cache threshold (0.92)",
-		},
-		// Other/general with relaxed cache threshold (0.75)
-		{
-			Query:            "Tell me something interesting",
-			ExpectedDecision: "other_decision",
-			PluginType:       "semantic-cache",
-			ExpectedBehavior: "cache_miss",
-			CacheSimilarity:  0.75,
-			Description:      "General query with relaxed cache threshold (0.75)",
-		},
-		// System prompt variations
-		{
-			Query:            "What is 100 divided by 5?",
-			ExpectedDecision: "math_decision",
-			PluginType:       "system_prompt",
-			ExpectedBehavior: "prompt_applied",
-			Description:      "Math query should have math expert system prompt applied",
-		},
-		{
-			Query:            "Explain Newton's laws of motion",
-			ExpectedDecision: "physics_decision",
-			PluginType:       "system_prompt",
-			ExpectedBehavior: "prompt_applied",
-			Description:      "Physics query should have physics expert system prompt applied",
-		},
+	// Load test cases from JSON file
+	testCases, err := loadPluginConfigCases()
+	if err != nil {
+		return fmt.Errorf("failed to load plugin config test cases: %w", err)
+	}
+
+	if opts.Verbose {
+		fmt.Printf("[Test] Loaded %d plugin config test cases from JSON\n", len(testCases))
 	}
 
 	// Run plugin config tests
@@ -252,6 +218,46 @@ func testSinglePluginConfig(ctx context.Context, testCase PluginConfigCase, loca
 	}
 
 	return result
+}
+
+// loadPluginConfigCases loads test cases from the JSON file
+func loadPluginConfigCases() ([]PluginConfigCase, error) {
+	// Try multiple paths to find the JSON file
+	possiblePaths := []string{
+		"e2e/testcases/testdata/plugin_config_cases.json",
+		"testcases/testdata/plugin_config_cases.json",
+		"testdata/plugin_config_cases.json",
+	}
+
+	var jsonPath string
+	for _, path := range possiblePaths {
+		if _, err := os.Stat(path); err == nil {
+			jsonPath = path
+			break
+		}
+		// Also try with absolute path from working directory
+		absPath, _ := filepath.Abs(path)
+		if _, err := os.Stat(absPath); err == nil {
+			jsonPath = absPath
+			break
+		}
+	}
+
+	if jsonPath == "" {
+		return nil, fmt.Errorf("could not find plugin_config_cases.json in any expected location")
+	}
+
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", jsonPath, err)
+	}
+
+	var testData PluginConfigTestData
+	if err := json.Unmarshal(data, &testData); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	return testData.TestCases, nil
 }
 
 func printPluginConfigResults(results []PluginConfigResult, totalTests, correctTests int, accuracy float64) {

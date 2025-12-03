@@ -314,3 +314,19 @@ config:
         service_name: "vllm-semantic-router"
         service_version: "v0.1.0"
         deployment_environment: "development"
+
+# Model downloads - use trained ModernBERT model
+initContainer:
+  models:
+    - name: Qwen3-Embedding-0.6B
+      repo: Qwen/Qwen3-Embedding-0.6B
+    - name: all-MiniLM-L12-v2
+      repo: sentence-transformers/all-MiniLM-L12-v2
+    - name: category_classifier_modernbert-base_model
+      repo: ykerido/category-classifier-modernbert-trained-v4
+    - name: pii_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_model
+    - name: jailbreak_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model
+    - name: pii_classifier_modernbert-base_presidio_token_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_presidio_token_model

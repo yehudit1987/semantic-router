@@ -96,6 +96,9 @@ from common_lora_utils import (
 # Setup logging
 logger = setup_logging()
 
+# Default supplement dataset on HuggingFace Hub
+DEFAULT_SUPPLEMENT_DATASET = "ykerido/category-classifier-supplement"
+
 # Required categories to match legacy model (14 categories)
 REQUIRED_CATEGORIES = [
     "biology",
@@ -137,16 +140,36 @@ def create_tokenizer_for_model(model_path: str, base_model_name: str = None):
 class MMLU_Dataset:
     """Dataset class for MMLU-Pro category classification fine-tuning."""
 
-    def __init__(self, dataset_name="TIGER-Lab/MMLU-Pro"):
+    def __init__(self, dataset_name="TIGER-Lab/MMLU-Pro", supplement_dataset: str = DEFAULT_SUPPLEMENT_DATASET):
         """
         Initialize the dataset loader.
 
         Args:
             dataset_name: HuggingFace dataset name for MMLU-Pro
+            supplement_dataset: HuggingFace dataset for supplementary training data
         """
         self.dataset_name = dataset_name
+        self.supplement_dataset = supplement_dataset
         self.label2id = {}
         self.id2label = {}
+
+    def _load_supplement_data(self) -> list:
+        """Load supplementary training data from HuggingFace Hub."""
+        if not self.supplement_dataset:
+            return []
+        
+        try:
+            logger.info(f"Loading supplement dataset from: {self.supplement_dataset}")
+            print(f"📦 Loading supplement dataset: {self.supplement_dataset}")
+            supplement = load_dataset(self.supplement_dataset)
+            samples = [(item['text'], item['label']) for item in supplement["train"]]
+            logger.info(f"Loaded {len(samples)} supplement samples")
+            print(f"✅ Loaded {len(samples)} supplement samples")
+            return samples
+        except Exception as e:
+            logger.warning(f"Could not load supplement dataset: {e}")
+            print(f"⚠️ Could not load supplement dataset: {e}")
+            return []
 
     def load_huggingface_dataset(self, max_samples=1000):
         """Load the MMLU-Pro dataset from HuggingFace with balanced category sampling."""
@@ -233,7 +256,23 @@ class MMLU_Dataset:
                     )
 
             logger.info(f"Final category distribution: {category_counts}")
-            logger.info(f"Total filtered samples: {len(filtered_texts)}")
+            logger.info(f"MMLU-Pro samples: {len(filtered_texts)}")
+            print(f"📚 MMLU-Pro base: {len(filtered_texts)} samples")
+
+            # Load and merge supplement data
+            supplement_samples = self._load_supplement_data()
+            if supplement_samples:
+                supp_texts, supp_labels = zip(*supplement_samples)
+                filtered_texts.extend(supp_texts)
+                filtered_labels.extend(supp_labels)
+                print(f"➕ Added {len(supplement_samples)} supplement samples")
+                
+                # Update category counts
+                for label in supp_labels:
+                    category_counts[label] = category_counts.get(label, 0) + 1
+
+            logger.info(f"Total samples (with supplement): {len(filtered_texts)}")
+            print(f"📊 Total dataset size: {len(filtered_texts)} samples")
 
             # Ensure we have samples for all required categories
             missing_categories = set(available_required_categories) - set(

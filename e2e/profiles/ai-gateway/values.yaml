@@ -69,7 +69,12 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"        # Allow - business figures, authors
+              - "ORGANIZATION"  # Allow - company names, institutions
+              - "GPE"           # Allow - country/city names
+              - "DATE_TIME"     # Allow - dates in business scenarios
+              - "TITLE"         # Allow - CEO, Mr., Mrs.
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -92,7 +97,12 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"        # Allow - case parties, judges, legal scholars
+              - "ORGANIZATION"  # Allow - courts, law firms, institutions
+              - "GPE"           # Allow - jurisdictions, venues
+              - "DATE_TIME"     # Allow - case dates, statutes
+              - "TITLE"         # Allow - Judge, Attorney, etc.
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -115,7 +125,12 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"        # Allow - psychologists, researchers
+              - "ORGANIZATION"  # Allow - research institutions
+              - "GPE"           # Allow - study locations
+              - "DATE_TIME"     # Allow - study dates
+              - "NRP"
         - type: "semantic-cache"
           configuration:
             enabled: true
@@ -144,6 +159,10 @@ config:
             enabled: true
             pii_types_allowed:
               - "ORGANIZATION"  # Allow - scientific terms like "photosynthesis" falsely detected as ORG
+              - "PERSON"
+              - "GPE"
+              - "DATE_TIME"
+              - "NRP"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -166,7 +185,16 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"           # Allow - scientists, chemists
+              - "ORGANIZATION"     # Allow - labs, institutions
+              - "DATE_TIME"        # Allow - discovery dates
+              - "GPE"              # Allow - locations
+              - "NRP"              # Allow - nationalities
+              - "STREET_ADDRESS"   # Allow - numbers in formulas detected as addresses
+              - "AGE"              # Allow - ages in word problems
+              - "ZIP_CODE"         # Allow - numbers detected as zip codes
+              - "TITLE"            # Allow - units/symbols detected as titles
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -189,7 +217,13 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"        # Allow - historical figures
+              - "GPE"           # Allow - countries, cities, regions
+              - "ORGANIZATION"  # Allow - empires, governments
+              - "DATE_TIME"     # Allow - historical dates
+              - "NRP"           # Allow - nationalities, religious groups (Ottoman, Safavid)
+              - "TITLE"         # Allow - titles (Sultan, King, Emperor)
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -212,7 +246,16 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"           # Allow - researchers, doctors
+              - "ORGANIZATION"     # Allow - hospitals, institutions
+              - "DATE_TIME"        # Allow - study dates
+              - "GPE"              # Allow - locations
+              - "NRP"              # Allow - nationalities
+              - "AGE"              # Allow - patient ages in clinical scenarios
+              - "STREET_ADDRESS"   # Allow - numbers in dosages detected as addresses
+              - "ZIP_CODE"         # Allow - numbers detected as zip codes
+              - "TITLE"            # Allow - medical titles
         - type: "semantic-cache"
           configuration:
             enabled: true
@@ -239,7 +282,16 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"           # Allow - economists, policy makers
+              - "ORGANIZATION"     # Allow - banks, institutions
+              - "GPE"              # Allow - countries, regions
+              - "DATE_TIME"        # Allow - economic periods
+              - "NRP"              # Allow - nationalities
+              - "TITLE"            # Allow - symbols like 'q' detected as titles
+              - "STREET_ADDRESS"   # Allow - numbers in formulas
+              - "AGE"              # Allow - demographic data
+              - "ZIP_CODE"         # Allow - numbers detected as zip codes
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -262,7 +314,16 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"           # Allow - mathematicians
+              - "ORGANIZATION"     # Allow - institutions
+              - "DATE_TIME"        # Allow - word problems with dates
+              - "GPE"              # Allow - locations
+              - "NRP"              # Allow - nationalities
+              - "STREET_ADDRESS"   # Allow - numbers detected as addresses
+              - "AGE"              # Allow - ages in word problems
+              - "ZIP_CODE"         # Allow - numbers detected as zip codes
+              - "TITLE"            # Allow - symbols detected as titles
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -285,7 +346,16 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"           # Allow - physicists, scientists
+              - "ORGANIZATION"     # Allow - labs, institutions
+              - "DATE_TIME"        # Allow - experiment dates
+              - "GPE"              # Allow - locations
+              - "NRP"              # Allow - nationalities
+              - "STREET_ADDRESS"   # Allow - numbers in formulas detected as addresses
+              - "AGE"              # Allow - ages in word problems
+              - "ZIP_CODE"         # Allow - numbers detected as zip codes
+              - "TITLE"            # Allow - units detected as titles
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -308,7 +378,12 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"        # Allow - researchers, paper authors
+              - "ORGANIZATION"  # Allow - tech companies, institutions
+              - "DATE_TIME"     # Allow - paper dates
+              - "GPE"
+              - "NRP"
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -331,7 +406,12 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"        # Allow - philosophers
+              - "GPE"           # Allow - Ancient Greece, etc.
+              - "DATE_TIME"     # Allow - historical periods
+              - "NRP"           # Allow - Platonic, Stoic, Greek, etc.
+              - "TITLE"         # Allow - Professor, Dr.
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -354,7 +434,17 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed: []
+            pii_types_allowed:
+              - "PERSON"           # Allow - engineers, inventors
+              - "ORGANIZATION"     # Allow - companies, standards bodies
+              - "DATE_TIME"        # Allow - specifications dates
+              - "GPE"              # Allow - locations
+              - "NRP"              # Allow - nationalities
+              - "STREET_ADDRESS"   # Allow - numbers in formulas detected as addresses
+              - "AGE"              # Allow - ages in word problems
+              - "ZIP_CODE"         # Allow - numbers detected as zip codes
+              - "TITLE"            # Allow - units/symbols detected as titles
+              - "PHONE_NUMBER"     # Allow - number sequences in formulas (e.g., 50MHz, 150+j40)
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -446,12 +536,11 @@ config:
         - type: "pii"
           configuration:
             enabled: true
-            pii_types_allowed:
-              - "GPE"  # Allow - country/city names in general knowledge questions
+            pii_types_allowed: []  # Strict - block all PII for general/other queries
         - type: "semantic-cache"
           configuration:
             enabled: true
-            similarity_threshold: 0.75
+            similarity_threshold: 0.95  # High threshold to avoid false cache hits during testing
         - type: "system_prompt"
           configuration:
             enabled: true
@@ -472,7 +561,7 @@ config:
   semantic_cache:
     enabled: true
     backend_type: "memory"  # Options: "memory", "milvus", or "hybrid"
-    similarity_threshold: 0.8
+    similarity_threshold: 0.95  # High threshold during testing to avoid false cache hits
     max_entries: 1000  # Only applies to memory backend
     ttl_seconds: 3600
     eviction_policy: "fifo"
@@ -509,17 +598,16 @@ config:
   # Classifier configuration
   classifier:
     category_model:
-      model_id: "models/lora_intent_classifier_bert-base-uncased_model"
-      use_modernbert: false  # Use LoRA intent classifier with auto-detection
+      model_id: "models/category_classifier_modernbert-base_model"
+      use_modernbert: true
       threshold: 0.6
       use_cpu: true
-      category_mapping_path: "models/lora_intent_classifier_bert-base-uncased_model/category_mapping.json"
+      category_mapping_path: "models/category_classifier_modernbert-base_model/category_mapping.json"
     pii_model:
-      # Support both traditional (modernbert) and LoRA-based PII detection
-      # When model_type is "auto", the system will auto-detect LoRA configuration
-      model_id: "models/lora_pii_detector_bert-base-uncased_model"
-      use_modernbert: false  # Use LoRA PII model with auto-detection
-      threshold: 0.9
+      # Use the presidio token model that's being downloaded
+      model_id: "models/pii_classifier_modernbert-base_presidio_token_model"
+      use_modernbert: true
+      threshold: 0.7
       use_cpu: true
       pii_mapping_path: "models/pii_classifier_modernbert-base_presidio_token_model/pii_type_mapping.json"
 
@@ -646,4 +734,21 @@ config:
         service_name: "vllm-semantic-router"
         service_version: "v0.1.0"
         deployment_environment: "development"
+
+# Override initContainer models to use custom trained model
+initContainer:
+  models:
+    - name: Qwen3-Embedding-0.6B
+      repo: Qwen/Qwen3-Embedding-0.6B
+    - name: all-MiniLM-L12-v2
+      repo: sentence-transformers/all-MiniLM-L12-v2
+    # Use YOUR trained model instead of the default
+    - name: category_classifier_modernbert-base_model
+      repo: ykerido/category-classifier-modernbert-trained-v4
+    - name: pii_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_model
+    - name: jailbreak_classifier_modernbert-base_model
+      repo: LLM-Semantic-Router/jailbreak_classifier_modernbert-base_model
+    - name: pii_classifier_modernbert-base_presidio_token_model
+      repo: LLM-Semantic-Router/pii_classifier_modernbert-base_presidio_token_model
 

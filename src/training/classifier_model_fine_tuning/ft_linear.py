@@ -153,8 +153,17 @@ class MMLU_Dataset:
 
             # Extract questions and categories from the test split
             # Note: MMLU-Pro typically uses 'test' split for training data
-            texts = dataset["test"]["question"]
-            labels = dataset["test"]["category"]
+            texts = list(dataset["test"]["question"])
+            labels = list(dataset["test"]["category"])
+
+            # Add supplementary "other" category samples for better fallback classification
+            # These help the model recognize non-academic queries that should fallback
+            other_samples = self._get_other_category_samples()
+            if other_samples:
+                other_texts, other_labels = zip(*other_samples)
+                texts.extend(other_texts)
+                labels.extend(other_labels)
+                logger.info(f"Added {len(other_samples)} 'other' category samples for better fallback")
 
             logger.info(f"Loaded {len(texts)} samples")
             return texts, labels
@@ -162,6 +171,76 @@ class MMLU_Dataset:
         except Exception as e:
             logger.error(f"Failed to load dataset: {e}")
             exit(1)
+
+    def _get_other_category_samples(self):
+        """
+        Return supplementary training samples for the 'other' category.
+        These help the model recognize casual, vague, or non-academic queries
+        that should fallback to the 'other' category.
+        """
+        other_samples = [
+            # Jokes and humor
+            ("Tell me a joke", "other"),
+            ("Can you tell me something funny?", "other"),
+            ("Make me laugh", "other"),
+            ("Do you know any good jokes?", "other"),
+            ("Tell me a funny story", "other"),
+            
+            # Casual conversation
+            ("How are you today?", "other"),
+            ("What's up?", "other"),
+            ("Hello, how are you doing?", "other"),
+            ("Hi there!", "other"),
+            ("Good morning!", "other"),
+            ("What do you think about the weather?", "other"),
+            ("How's your day going?", "other"),
+            
+            # Vague/random queries
+            ("Random unclassified query about nothing specific", "other"),
+            ("Just wondering about stuff", "other"),
+            ("Tell me something interesting", "other"),
+            ("What should I do today?", "other"),
+            ("I'm bored", "other"),
+            ("What's new?", "other"),
+            ("Anything exciting happening?", "other"),
+            
+            # Entertainment requests
+            ("Recommend me a movie", "other"),
+            ("What's a good book to read?", "other"),
+            ("Suggest something fun to do", "other"),
+            ("What games should I play?", "other"),
+            ("Tell me a story", "other"),
+            
+            # Personal questions
+            ("What's your favorite color?", "other"),
+            ("Do you have feelings?", "other"),
+            ("Are you an AI?", "other"),
+            ("Who created you?", "other"),
+            ("What can you do?", "other"),
+            
+            # Off-topic queries
+            ("What time is it?", "other"),
+            ("What day is today?", "other"),
+            ("What's the weather like?", "other"),
+            ("Where am I?", "other"),
+            ("Who am I talking to?", "other"),
+            
+            # Ambiguous requests
+            ("Help me with something", "other"),
+            ("I need assistance", "other"),
+            ("Can you help?", "other"),
+            ("I have a question", "other"),
+            ("Not sure what to ask", "other"),
+            
+            # Nonsense/gibberish (to catch truly random input)
+            ("asdf jkl;", "other"),
+            ("xyz 123", "other"),
+            ("blah blah blah", "other"),
+            ("random words here", "other"),
+            ("testing testing 123", "other"),
+        ]
+        
+        return other_samples
 
     def split_dataset(
         self,

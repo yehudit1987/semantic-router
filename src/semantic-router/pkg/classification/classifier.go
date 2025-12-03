@@ -856,18 +856,34 @@ func (c *Classifier) classifyCategoryWithEntropyInTree(text string) (string, flo
 
 	// Check confidence threshold for category determination
 	if result.Confidence < c.Config.CategoryModel.Threshold {
-		logging.Infof("Classification confidence (%.4f) below threshold (%.4f), but entropy analysis available",
-			result.Confidence, c.Config.CategoryModel.Threshold)
+		// Determine fallback category (default to "other" if not configured)
+		fallbackCategory := c.Config.CategoryModel.FallbackCategory
+		if fallbackCategory == "" {
+			fallbackCategory = "other"
+		}
 
-		// Still return reasoning decision based on entropy even if confidence is low
-		return "", float64(result.Confidence), reasoningDecision, nil
+		logging.Infof("Classification confidence (%.4f) below threshold (%.4f), falling back to category: %s",
+			result.Confidence, c.Config.CategoryModel.Threshold, fallbackCategory)
+
+		// Record the fallback category classification metric
+		metrics.RecordCategoryClassification(fallbackCategory)
+
+		// Return fallback category instead of empty string to enable proper decision routing
+		return fallbackCategory, float64(result.Confidence), reasoningDecision, nil
 	}
 
 	// Convert class index to category name and translate to generic
 	categoryName, ok := c.CategoryMapping.GetCategoryFromIndex(result.Class)
 	if !ok {
-		logging.Warnf("Class index %d not found in category mapping", result.Class)
-		return "", float64(result.Confidence), reasoningDecision, nil
+		// Determine fallback category (default to "other" if not configured)
+		fallbackCategory := c.Config.CategoryModel.FallbackCategory
+		if fallbackCategory == "" {
+			fallbackCategory = "other"
+		}
+
+		logging.Warnf("Class index %d not found in category mapping, falling back to: %s", result.Class, fallbackCategory)
+		metrics.RecordCategoryClassification(fallbackCategory)
+		return fallbackCategory, float64(result.Confidence), reasoningDecision, nil
 	}
 	genericCategory := c.translateMMLUToGeneric(categoryName)
 

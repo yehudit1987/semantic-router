@@ -127,7 +127,7 @@ config:
 
   embedding_models:
     qwen3_model_path: "models/Qwen3-Embedding-0.6B"
-    gemma_model_path: ""  # Empty = fallback to Qwen3 (embeddinggemma requires HF_TOKEN)
+    gemma_model_path: ""  # Gemma disabled in CI (gated model requires HF_TOKEN). Set path for local dev.
     use_cpu: true
 
 # Increase memory limits for embedding model support

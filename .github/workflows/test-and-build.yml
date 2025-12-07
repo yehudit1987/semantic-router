@@ -78,14 +78,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      # Setup model storage on /mnt (has ~75GB vs ~14GB on root)
+      # This avoids disk space issues without deleting toolchains
+      - name: Setup model storage on /mnt
+        run: |
+          echo "Disk space before setup:"
+          df -h
+          sudo mkdir -p /mnt/models
+          sudo chown -R $USER:$USER /mnt/models
+          # Remove existing models dir/symlink to create fresh symlink
+          rm -rf models
+          ln -s /mnt/models models
+          echo "Model storage symlinked: models -> /mnt/models"
+
       - name: Cache Models
         uses: actions/cache@v4
         with:
           path: |
-            models/
-          key: ${{ runner.os }}-models-v1-${{ hashFiles('tools/make/models.mk') }}
+            /mnt/models/
+          key: ${{ runner.os }}-models-v2-${{ hashFiles('tools/make/models.mk') }}
           restore-keys: |
-            ${{ runner.os }}-models-v1-
+            ${{ runner.os }}-models-v2-
         continue-on-error: true # Don't fail the job if caching fails
 
       - name: Check go mod tidy
@@ -98,9 +111,11 @@ jobs:
         run: |
           pip install -U "huggingface_hub[cli]" hf_transfer
 
-      - name: Download models (minimal on PRs)
+      - name: Download models (minimal in CI - Gemma excluded as gated model)
         env:
-          CI_MINIMAL_MODELS: ${{ github.event_name == 'pull_request' }}
+          # Always use minimal models in CI to avoid gated model (Gemma) authentication issues
+          # Full models with Gemma available for local dev with HF_TOKEN
+          CI_MINIMAL_MODELS: true
           HF_HUB_ENABLE_HF_TRANSFER: 1
           HF_HUB_DISABLE_TELEMETRY: 1
         run: make download-models
@@ -139,7 +154,8 @@ jobs:
         run: make test
         env:
           CI: true
-          CI_MINIMAL_MODELS: ${{ github.event_name == 'pull_request' }}
+          # Always use minimal models in CI (Gemma is gated, requires HF_TOKEN)
+          CI_MINIMAL_MODELS: true
           CGO_ENABLED: 1
           LD_LIBRARY_PATH: ${{ github.workspace }}/candle-binding/target/release
           MILVUS_URI: localhost:19530

@@ -75,16 +75,20 @@ jobs:
         run: |
           make build-e2e
 
-      - name: Free up disk space
+      # Setup model storage on /mnt (has ~75GB vs ~14GB on root)
+      # This is more elegant than deleting toolchains and provides more space
+      - name: Setup model storage on /mnt
         run: |
-          # Remove unnecessary toolchains to free ~25GB disk space
-          # This helps prevent "no space left on device" errors
-          echo "Disk before cleanup:"
-          df -h /
-          # Note: Do NOT remove $AGENT_TOOLSDIRECTORY - it contains Go/Rust from setup actions
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
-          echo "Disk after cleanup:"
-          df -h /
+          echo "Disk space before setup:"
+          df -h
+          sudo mkdir -p /mnt/models
+          sudo chown -R $USER:$USER /mnt/models
+          # Remove existing models dir/symlink to create fresh symlink
+          rm -rf models
+          ln -s /mnt/models models
+          echo "Model storage symlinked: models -> /mnt/models"
+          echo "Disk space after setup:"
+          df -h
 
       - name: Run Integration E2E tests (${{ matrix.profile }})
         id: e2e-test

@@ -956,7 +956,16 @@ impl DualPathUnifiedClassifier {
             )));
         }
 
+        // Check model availability BEFORE routing to avoid selecting unavailable models
+        // Gemma is disabled in CI (gated model requires HF_TOKEN), available for local dev
+        let gemma_available = if let Some(factory) = GLOBAL_MODEL_FACTORY.get() {
+            factory.get_gemma_model().is_some()
+        } else {
+            false
+        };
+
         // Intelligent routing based on sequence length and priority
+        // Only consider Gemma if it's actually available (disabled in CI, available for local dev)
         let model_type = match requirements.sequence_length {
             // Short sequences (0-512 tokens)
             // Decision based on latency vs quality priority
@@ -967,28 +976,34 @@ impl DualPathUnifiedClassifier {
                     // - Last token pooling (better for instructions)
                     // - Larger hidden size (1024 vs 768)
                     ModelType::Qwen3Embedding
-                } else if requirements.latency_priority > 0.7 {
-                    // High latency priority (> 0.7) -> Choose Gemma (faster)
+                } else if requirements.latency_priority > 0.7 && gemma_available {
+                    // High latency priority (> 0.7) -> Choose Gemma (faster) if available
                     // - Inference time: ~20ms
                     // - Mean pooling + Dense bottleneck
                     // - Good quality despite smaller size
                     ModelType::GemmaEmbedding
                 } else {
-                    // Balanced or quality-favoring (latency <= 0.7) -> Choose Qwen3
+                    // Balanced, quality-favoring, or Gemma not available -> Choose Qwen3
                     // Default to Qwen3 for better quality when priorities are balanced
                     ModelType::Qwen3Embedding
                 }
             }
 
             // Medium sequences (513-2048 tokens)
-            // Gemma is optimal: sufficient context window (8K), good speed
+            // Gemma is optimal if available: sufficient context window (8K), good speed
             513..=2048 => {
-                // GemmaEmbedding is optimal for this range
-                // - Supports up to 8K context (plenty of headroom)
-                // - Good balance of speed (~50ms) and quality
-                // - Dense bottleneck provides high-quality embeddings
-                // - Matryoshka support for flexible dimensions
-                ModelType::GemmaEmbedding
+                if gemma_available {
+                    // GemmaEmbedding is optimal for this range
+                    // - Supports up to 8K context (plenty of headroom)
+                    // - Good balance of speed (~50ms) and quality
+                    // - Dense bottleneck provides high-quality embeddings
+                    // - Matryoshka support for flexible dimensions
+                    ModelType::GemmaEmbedding
+                } else {
+                    // Gemma not available (CI environment), use Qwen3
+                    // Qwen3 also supports this range with 32K context
+                    ModelType::Qwen3Embedding
+                }
             }
 
             // Long sequences (2049-32768 tokens)
@@ -1012,10 +1027,10 @@ impl DualPathUnifiedClassifier {
         };
 
         // Consider Matryoshka dimension requirements
-        // If target_dimension is < 768, Gemma might be more efficient
+        // If target_dimension is < 768, Gemma might be more efficient (if available)
         let model_type = if let Some(target_dim) = requirements.target_dimension {
-            if target_dim < 768 && requirements.latency_priority > 0.5 {
-                // For smaller dimensions with latency priority, prefer Gemma
+            if target_dim < 768 && requirements.latency_priority > 0.5 && gemma_available {
+                // For smaller dimensions with latency priority, prefer Gemma if available
                 // Gemma supports Matryoshka representation learning (768/512/256/128)
                 ModelType::GemmaEmbedding
             } else {
@@ -1025,35 +1040,35 @@ impl DualPathUnifiedClassifier {
             model_type
         };
 
-        // Validate model availability and fall back if necessary
+        // Validate model availability - no fallback between models
+        // Gemma is disabled in CI (gated model), available for local dev
+        // Qwen3 is the primary model for CI environments
         let model_type = match model_type {
             ModelType::GemmaEmbedding => {
-                // Check if Gemma is available
+                // Check if Gemma is available - fail explicitly if not
                 if let Some(factory) = GLOBAL_MODEL_FACTORY.get() {
                     if factory.get_gemma_model().is_none() {
-                        // Gemma not available, fall back to Qwen3
-                        eprintln!(
-                            "WARNING: GemmaEmbedding selected but not available, falling back to Qwen3Embedding"
-                        );
-                        ModelType::Qwen3Embedding
-                    } else {
-                        ModelType::GemmaEmbedding
+                        return Err(UnifiedClassifierError::ProcessingError(
+                            "GemmaEmbedding selected but not available. \
+                             Gemma is a gated model requiring HF_TOKEN. \
+                             In CI environments, use Qwen3Embedding instead."
+                                .to_string(),
+                        ));
                     }
                 } else {
-                    // No factory available, fall back to Qwen3
-                    eprintln!(
-                        "WARNING: ModelFactory not initialized, falling back to Qwen3Embedding"
-                    );
-                    ModelType::Qwen3Embedding
+                    return Err(UnifiedClassifierError::ProcessingError(
+                        "ModelFactory not initialized. Cannot validate GemmaEmbedding availability."
+                            .to_string(),
+                    ));
                 }
+                ModelType::GemmaEmbedding
             }
             ModelType::Qwen3Embedding => {
-                // Qwen3 is the default, should always be available
-                // But verify just in case
+                // Qwen3 is the primary model, should always be available
                 if let Some(factory) = GLOBAL_MODEL_FACTORY.get() {
                     if factory.get_qwen3_model().is_none() {
                         return Err(UnifiedClassifierError::ProcessingError(
-                            "Qwen3Embedding selected but not available and no fallback available"
+                            "Qwen3Embedding selected but not available."
                                 .to_string(),
                         ));
                     }

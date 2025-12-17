@@ -509,3 +509,10 @@ observability:
       service_name: "vllm-semantic-router"
       service_version: "v0.1.0"
       deployment_environment: "development"
+
+memory:
+  enabled: true
+  store_backend: "milvus"  # Changed from "memory" to persist across restarts
+  milvus:
+    address: "milvus:19530"
+    collection: "agentic_memory"

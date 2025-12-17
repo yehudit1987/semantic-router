@@ -117,6 +117,38 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 	}
 	logging.Infof("handleCaching returned no cached response, continuing to model routing")
 
+	// Agentic Memory: Retrieve relevant memories and inject into context
+	// This happens AFTER cache check (no point if cache hit) and BEFORE LLM call
+	if r.MemoryFilter != nil && r.MemoryFilter.IsEnabled() &&
+		ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.OriginalRequest != nil {
+
+		memCtx, err := r.MemoryFilter.ProcessResponseAPIRequest(
+			ctx.TraceContext,
+			ctx.ResponseAPICtx.OriginalRequest,
+			userContent,
+		)
+		if err != nil {
+			logging.Warnf("Memory retrieval error: %v", err)
+		}
+		if memCtx != nil {
+			// Always set MemoryCtx so storage can happen in response phase
+			ctx.MemoryCtx = memCtx
+			logging.Infof("Memory: Retrieved %d memories (auto_store=%v)", len(memCtx.RetrievedMemories), memCtx.ShouldStore)
+
+			// Inject memories into context if any were retrieved
+			if memCtx.InjectedContext != "" {
+				requestBody, err = r.MemoryFilter.InjectMemoryContext(requestBody, memCtx)
+				if err != nil {
+					logging.Warnf("Memory context injection error: %v", err)
+				} else {
+					logging.Infof("Memory: Injected %d memories into LLM context", len(memCtx.RetrievedMemories))
+					// Re-parse the modified request
+					openAIRequest, _ = parseOpenAIRequest(requestBody)
+				}
+			}
+		}
+	}
+
 	// Handle model selection and routing with pre-computed classification results and selected model
 	return r.handleModelRouting(openAIRequest, originalModel, decisionName, classificationConfidence, reasoningDecision, selectedModel, ctx)
 }

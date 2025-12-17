@@ -21,6 +21,9 @@ services:
       - HF_HUB_ENABLE_HF_TRANSFER=1
     networks:
       - semantic-network
+    depends_on:
+      milvus:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "localhost:8080/health"]
       interval: 30s
@@ -119,6 +122,154 @@ services:
     depends_on:
       - prometheus
 
+  # Open WebUI (kept for feature parity and user choice)
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    ports:
+      - "3001:8080"  # Expose Open WebUI on host 3001
+    environment:
+      - WEBUI_NAME=Open WebUI
+      # Route Open WebUI's OpenAI-compatible calls through Pipelines by default
+      - OPENAI_API_BASE_URL=http://pipelines:9099
+      - OPENAI_API_KEY=0p3n-w3bu!
+    volumes:
+      - openwebui-data:/app/backend/data
+    networks:
+      - semantic-network
+
+  # Chat UI (Hugging Face) replacing Open WebUI
+  chat-ui:
+    image: ghcr.io/huggingface/chat-ui-db:latest
+    container_name: chat-ui
+    ports:
+      - "3002:3000"  # Expose Chat UI on host 3002
+    environment:
+      # Point Chat UI to Envoy's OpenAI-compatible endpoint
+      - OPENAI_BASE_URL=http://envoy-proxy:8801/v1
+      # Provide a token if your upstream requires it; for HF router use hf_xxx
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-changeme}
+      # MongoDB for persistence (use Atlas by overriding MONGODB_URL)
+      - MONGODB_URL=${MONGODB_URL:-mongodb://mongo:27017}
+      - MONGODB_DB_NAME=${MONGODB_DB_NAME:-chat-ui}
+      # Optional theming (override as needed)
+      - PUBLIC_APP_NAME=${PUBLIC_APP_NAME:-HuggingChat}
+      - PUBLIC_APP_ASSETS=${PUBLIC_APP_ASSETS:-chatui}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      envoy:
+        condition: service_started
+      semantic-router:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - semantic-network
+
+  # Open WebUI Pipelines server (executes Python pipelines)
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    container_name: pipelines
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Persistent pipelines storage (auto-loaded on start)
+      - type: volume
+        source: openwebui-pipelines
+        target: /app/pipelines
+        volume:
+          nocopy: true
+      # Mount our vLLM Semantic Router pipeline (read-only) into the persistent dir
+      - type: bind
+        source: ./addons/vllm_semantic_router_pipe.py
+        target: /app/pipelines/vllm_semantic_router_pipe.py
+        read_only: true
+    networks:
+      - semantic-network
+
+  # MongoDB for Chat UI persistence (dev default; use Atlas in prod)
+  mongo:
+    image: mongo:7
+    container_name: mongo
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - semantic-network
+
+  # ===== Milvus Vector DB for Agentic Memory =====
+  # etcd for Milvus metadata
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - semantic-network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO for Milvus object storage
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "9001:9001"  # MinIO console (optional)
+    networks:
+      - semantic-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Milvus vector database
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"  # Milvus gRPC port
+      - "9091:9091"    # Milvus metrics
+    networks:
+      - semantic-network
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
   # LLM Katan service for testing
   llm-katan:
     image: ${LLM_KATAN_IMAGE:-ghcr.io/vllm-project/semantic-router/llm-katan:latest}
@@ -193,3 +344,7 @@ volumes:
   prometheus-data:
   grafana-data:
   hf-cache:
+  # Milvus volumes for persistent vector storage
+  etcd-data:
+  minio-data:
+  milvus-data:

@@ -79,6 +79,9 @@ type RequestContext struct {
 
 	// Response API context
 	ResponseAPICtx *ResponseAPIContext // Non-nil if this is a Response API request
+
+	// Agentic Memory context
+	MemoryCtx *MemoryFilterContext // Non-nil if memory is enabled for this request
 }
 
 // handleRequestHeaders processes the request headers

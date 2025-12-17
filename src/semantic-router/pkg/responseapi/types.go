@@ -49,6 +49,39 @@ type ResponseAPIRequest struct {
 
 	// ConversationID links to a conversation object (optional)
 	ConversationID string `json:"conversation_id,omitempty"`
+
+	// MemoryConfig configures agentic memory behavior for this request
+	MemoryConfig *MemoryConfig `json:"memory_config,omitempty"`
+
+	// MemoryContext provides scoping context for memory operations
+	MemoryContext *MemoryContext `json:"memory_context,omitempty"`
+}
+
+// MemoryConfig configures agentic memory behavior for a request.
+type MemoryConfig struct {
+	// Enabled determines if memory retrieval should occur
+	Enabled bool `json:"enabled"`
+
+	// MemoryTypes to search: "episodic", "semantic", "procedural", "working"
+	MemoryTypes []string `json:"memory_types,omitempty"`
+
+	// RetrievalLimit is the max number of memories to retrieve (default: 5)
+	RetrievalLimit int `json:"retrieval_limit,omitempty"`
+
+	// SimilarityThreshold is the minimum relevance score (0-1, default: 0.7)
+	SimilarityThreshold float32 `json:"similarity_threshold,omitempty"`
+
+	// AutoStore determines if the conversation should be stored as memory
+	AutoStore bool `json:"auto_store,omitempty"`
+}
+
+// MemoryContext provides scoping context for memory operations.
+type MemoryContext struct {
+	// UserID is required for all memory operations
+	UserID string `json:"user_id"`
+
+	// ProjectID is optional for project-scoped memories
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // ResponseAPIResponse represents the response from the Response API.
@@ -127,6 +160,42 @@ type ResponseAPIResponse struct {
 
 	// ReasoningEffort for reasoning models
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+
+	// MemoryOperations contains information about memory operations performed
+	MemoryOperations *MemoryOperations `json:"memory_operations,omitempty"`
+}
+
+// MemoryOperations describes memory operations performed during a request.
+type MemoryOperations struct {
+	// Retrieved contains memories that were retrieved and used
+	Retrieved []RetrievedMemory `json:"retrieved,omitempty"`
+
+	// Stored contains memories that were created from this response
+	Stored []StoredMemoryRef `json:"stored,omitempty"`
+}
+
+// RetrievedMemory represents a memory that was retrieved and injected into context.
+type RetrievedMemory struct {
+	// ID is the memory identifier
+	ID string `json:"id"`
+
+	// Type is the memory type: "episodic", "semantic", "procedural", "working"
+	Type string `json:"type"`
+
+	// Content is the memory content (may be truncated)
+	Content string `json:"content"`
+
+	// Relevance is the similarity score (0-1)
+	Relevance float64 `json:"relevance"`
+}
+
+// StoredMemoryRef is a reference to a memory that was stored.
+type StoredMemoryRef struct {
+	// ID is the memory identifier
+	ID string `json:"id"`
+
+	// Type is the memory type
+	Type string `json:"type"`
 }
 
 // InputItem represents an input item in a Response API request.

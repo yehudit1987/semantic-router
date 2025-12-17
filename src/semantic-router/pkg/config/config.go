@@ -34,6 +34,8 @@ type RouterConfig struct {
 	SemanticCache `yaml:"semantic_cache"`
 	// Response API configuration for stateful conversations
 	ResponseAPI ResponseAPIConfig `yaml:"response_api"`
+	// Agentic Memory configuration for cross-session knowledge
+	Memory MemoryConfig `yaml:"memory"`
 	// LLMObservability for LLM tracing, metrics, and logging
 	LLMObservability `yaml:",inline"`
 	// API server configuration
@@ -268,6 +270,43 @@ type ResponseAPIMilvusConfig struct {
 
 	// Collection name for storing responses
 	Collection string `yaml:"collection,omitempty"`
+}
+
+// MemoryConfig configures Agentic Memory for cross-session knowledge persistence.
+// When enabled, the router can store and retrieve memories across conversations.
+type MemoryConfig struct {
+	// Enable Agentic Memory
+	Enabled bool `yaml:"enabled"`
+
+	// Storage backend type: "memory", "milvus"
+	// Default: "memory" (non-persistent, for development)
+	StoreBackend string `yaml:"store_backend,omitempty"`
+
+	// Milvus configuration (when store_backend is "milvus")
+	Milvus MemoryMilvusConfig `yaml:"milvus,omitempty"`
+
+	// Default retrieval limit (max memories to return per query)
+	DefaultRetrievalLimit int `yaml:"default_retrieval_limit,omitempty"`
+
+	// Default similarity threshold (0-1)
+	DefaultSimilarityThreshold float32 `yaml:"default_similarity_threshold,omitempty"`
+}
+
+// MemoryMilvusConfig configures Milvus storage for Agentic Memory.
+type MemoryMilvusConfig struct {
+	// Milvus server address (e.g., "localhost:19530")
+	Address string `yaml:"address"`
+
+	// Database name
+	Database string `yaml:"database,omitempty"`
+
+	// Collection name for storing memories
+	Collection string `yaml:"collection,omitempty"`
+
+	// HNSW index parameters
+	EfConstruction int `yaml:"ef_construction,omitempty"` // Default: 256
+	M              int `yaml:"m,omitempty"`               // Default: 16
+	Ef             int `yaml:"ef,omitempty"`              // Default: 64
 }
 
 // KeywordRule defines a rule for keyword-based classification.

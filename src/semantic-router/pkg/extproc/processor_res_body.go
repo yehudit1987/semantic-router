@@ -127,6 +127,16 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 		}
 	}
 
+	// Agentic Memory: Store new memories from the response if auto_store is enabled
+	// This happens AFTER cache update and BEFORE Response API translation
+	if r.MemoryFilter != nil && ctx.MemoryCtx != nil && ctx.MemoryCtx.ShouldStore {
+		if err := r.MemoryFilter.StoreFromResponse(ctx.TraceContext, ctx.MemoryCtx, responseBody, ctx.UserContent); err != nil {
+			logging.Warnf("Memory storage error: %v", err)
+		} else if ctx.MemoryCtx.StoredMemoryID != "" {
+			logging.Infof("Memory: Stored episodic memory %s", ctx.MemoryCtx.StoredMemoryID)
+		}
+	}
+
 	// Translate response for Response API requests
 	finalBody := responseBody
 	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest && r.ResponseAPIFilter != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/cache"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/memory"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/responsestore"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
@@ -28,6 +29,7 @@ type OpenAIRouter struct {
 	Cache                cache.CacheBackend
 	ToolsDatabase        *tools.ToolsDatabase
 	ResponseAPIFilter    *ResponseAPIFilter
+	MemoryFilter         *MemoryFilter // Agentic memory filter
 }
 
 // Ensure OpenAIRouter implements the ext_proc calls
@@ -179,6 +181,59 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		}
 	}
 
+	// Create Memory filter for agentic memory
+	var memoryFilter *MemoryFilter
+	if cfg.Memory.Enabled {
+		memoryStoreConfig := &memory.StoreConfig{
+			Type: memory.StoreType(cfg.Memory.StoreBackend),
+		}
+		// Configure Milvus if specified
+		if cfg.Memory.StoreBackend == "milvus" {
+			// Apply defaults for HNSW index parameters if not set
+			efConstruction := cfg.Memory.Milvus.EfConstruction
+			if efConstruction == 0 {
+				efConstruction = 256 // Milvus HNSW default
+			}
+			m := cfg.Memory.Milvus.M
+			if m == 0 {
+				m = 16 // Milvus HNSW default (must be 4-64)
+			}
+			ef := cfg.Memory.Milvus.Ef
+			if ef == 0 {
+				ef = 64 // Milvus HNSW default
+			}
+			// Apply defaults for similarity threshold and TopK
+			similarityThreshold := cfg.Memory.DefaultSimilarityThreshold
+			if similarityThreshold <= 0 {
+				similarityThreshold = 0.5 // Lower default for better recall
+			}
+			topK := cfg.Memory.DefaultRetrievalLimit
+			if topK <= 0 {
+				topK = 10
+			}
+
+			memoryStoreConfig.Milvus = &memory.MilvusStoreConfig{
+				Address:             cfg.Memory.Milvus.Address,
+				Database:            cfg.Memory.Milvus.Database,
+				CollectionName:      cfg.Memory.Milvus.Collection,
+				SimilarityThreshold: similarityThreshold,
+				TopK:                topK,
+				EfConstruction:      efConstruction,
+				M:                   m,
+				Ef:                  ef,
+			}
+			logging.Infof("Memory Milvus config: threshold=%.2f, topK=%d, M=%d, Ef=%d",
+				similarityThreshold, topK, m, ef)
+		}
+		memoryStore, err := memory.NewStore(memoryStoreConfig)
+		if err != nil {
+			logging.Warnf("Failed to create memory store: %v, Agentic Memory will be disabled", err)
+		} else {
+			memoryFilter = NewMemoryFilter(memoryStore)
+			logging.Infof("Agentic Memory enabled with %s backend", cfg.Memory.StoreBackend)
+		}
+	}
+
 	router := &OpenAIRouter{
 		Config:               cfg,
 		CategoryDescriptions: categoryDescriptions,
@@ -187,6 +242,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		Cache:                semanticCache,
 		ToolsDatabase:        toolsDatabase,
 		ResponseAPIFilter:    responseAPIFilter,
+		MemoryFilter:         memoryFilter,
 	}
 
 	return router, nil

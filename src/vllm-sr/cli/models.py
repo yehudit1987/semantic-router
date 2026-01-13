@@ -169,6 +169,50 @@ class Providers(BaseModel):
     external_models: Optional[List[ExternalModel]] = []
 
 
+class MemoryMilvusConfig(BaseModel):
+    """Milvus configuration for memory storage."""
+
+    address: str
+    collection: str = "agentic_memory"
+    dimension: int = 384
+
+
+class MemoryEmbeddingConfig(BaseModel):
+    """Embedding configuration for memory."""
+
+    model: str = "all-MiniLM-L6-v2"
+    dimension: int = 384
+
+
+class MemoryQueryRewriteConfig(BaseModel):
+    """Query rewrite configuration for memory search."""
+
+    enabled: bool = False
+    endpoint: Optional[str] = None
+    model: Optional[str] = None
+
+
+class MemoryExtractionConfig(BaseModel):
+    """Fact extraction configuration for memory saving."""
+
+    enabled: bool = True
+    endpoint: str
+    model: str
+    turns_before_extraction: int = 10
+
+
+class MemoryConfig(BaseModel):
+    """Agentic Memory configuration for cross-session memory."""
+
+    enabled: bool = True
+    milvus: Optional[MemoryMilvusConfig] = None
+    embedding: Optional[MemoryEmbeddingConfig] = None
+    default_retrieval_limit: int = 5
+    default_similarity_threshold: float = 0.6
+    query_rewrite: Optional[MemoryQueryRewriteConfig] = None
+    extraction: Optional[MemoryExtractionConfig] = None
+
+
 class UserConfig(BaseModel):
     """Complete user configuration."""
 
@@ -177,6 +221,7 @@ class UserConfig(BaseModel):
     signals: Optional[Signals] = None
     decisions: List[Decision]
     providers: Providers
+    memory: Optional[MemoryConfig] = None  # Agentic Memory config
 
     class Config:
         populate_by_name = True

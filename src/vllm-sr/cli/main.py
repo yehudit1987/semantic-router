@@ -132,6 +132,13 @@ def serve(config, image, image_pull_policy):
                 else:
                     log.info(f"Passing environment variable: {var}={os.environ[var]}")
 
+        # API keys for memory query rewriting (OpenAI, Gemini, OpenRouter, etc.)
+        api_key_vars = ["OPENAI_API_KEY", "QUERY_REWRITE_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"]
+        for var in api_key_vars:
+            if var in os.environ:
+                env_vars[var] = os.environ[var]
+                log.info(f"Passing environment variable: {var}=***")
+
         # Start container
         start_vllm_sr(
             config_file=str(config_path.absolute()),

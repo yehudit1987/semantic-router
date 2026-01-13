@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -310,13 +311,30 @@ func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig,
 	}
 
 	// Create HTTP request
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(cfg.Endpoint, "/"))
+	//
+	// TODO(production): Remove provider-specific URL handling.
+	// For production, consider one of these cleaner approaches:
+	//   1. Require full URL in config (e.g., "https://api.openai.com/v1/chat/completions")
+	//   2. Standardize on OpenAI-compatible format and always append /chat/completions
+	//
+	// Current approach detects providers by URL to handle different path structures:
+	// - OpenAI: base + /v1/chat/completions
+	// - Gemini: base + /chat/completions
+	// - OpenRouter: base already includes /v1, just add /chat/completions
+	endpoint := strings.TrimSuffix(cfg.Endpoint, "/")
+	var url string
+	if strings.Contains(endpoint, "generativelanguage.googleapis.com") || strings.Contains(endpoint, "openrouter.ai") {
+		url = fmt.Sprintf("%s/chat/completions", endpoint)
+	} else {
+		url = fmt.Sprintf("%s/v1/chat/completions", endpoint)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	setQueryRewriteAuthHeader(httpReq, cfg.Endpoint)
 
 	// Send request
 	client := &http.Client{Timeout: getTimeout(cfg)}
@@ -341,6 +359,30 @@ func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig,
 	}
 
 	return llmResp.Choices[0].Message.Content, nil
+}
+
+func setQueryRewriteAuthHeader(req *http.Request, endpoint string) {
+	apiKey := strings.TrimSpace(os.Getenv("QUERY_REWRITE_API_KEY"))
+
+	// Try provider-specific keys if QUERY_REWRITE_API_KEY not set
+	if apiKey == "" && strings.Contains(endpoint, "api.openai.com") {
+		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	}
+	if apiKey == "" && strings.Contains(endpoint, "generativelanguage.googleapis.com") {
+		// Gemini API - try multiple common env var names
+		apiKey = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+		if apiKey == "" {
+			apiKey = strings.TrimSpace(os.Getenv("GOOGLE_API_KEY"))
+		}
+	}
+	if apiKey == "" && strings.Contains(endpoint, "openrouter.ai") {
+		apiKey = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	}
+
+	if apiKey == "" {
+		return
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
 }
 
 // =============================================================================

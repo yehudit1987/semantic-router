@@ -49,6 +49,21 @@ type ResponseAPIRequest struct {
 
 	// ConversationID links to a conversation object (optional)
 	ConversationID string `json:"conversation_id,omitempty"`
+
+	// MemoryContext provides user context for agentic memory features
+	MemoryContext *MemoryContext `json:"memory_context,omitempty"`
+}
+
+// MemoryContext contains user identification for memory isolation.
+type MemoryContext struct {
+	// UserID is the unique identifier for the user (required for memory)
+	UserID string `json:"user_id"`
+
+	// ProjectID is an optional project/tenant identifier for scoping
+	ProjectID string `json:"project_id,omitempty"`
+
+	// Scope controls memory scope: "user", "project", or "global"
+	Scope string `json:"scope,omitempty"`
 }
 
 // ResponseAPIResponse represents the response from the Response API.

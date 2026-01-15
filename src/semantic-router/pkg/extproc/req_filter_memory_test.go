@@ -873,11 +873,11 @@ func TestTruncateForLog(t *testing.T) {
 func TestInjectMemories_NoMemories(t *testing.T) {
 	originalRequest := []byte(`{"model":"test","messages":[{"role":"user","content":"Hello"}]}`)
 
-	result, err := InjectMemories(originalRequest, nil)
+	result, err := InjectMemories(originalRequest, nil, "")
 	require.NoError(t, err)
 	assert.Equal(t, originalRequest, result, "should return original when no memories")
 
-	result, err = InjectMemories(originalRequest, []*memory.RetrieveResult{})
+	result, err = InjectMemories(originalRequest, []*memory.RetrieveResult{}, "")
 	require.NoError(t, err)
 	assert.Equal(t, originalRequest, result, "should return original when empty memories")
 }
@@ -892,7 +892,7 @@ func TestInjectMemories_SingleMemory(t *testing.T) {
 		},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	// Parse result to verify
@@ -929,7 +929,7 @@ func TestInjectMemories_MultipleMemories(t *testing.T) {
 		},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	// Parse result to verify
@@ -963,7 +963,7 @@ func TestInjectMemories_ExistingSystemMessage(t *testing.T) {
 		},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	// Parse result
@@ -990,7 +990,7 @@ func TestInjectMemories_InvalidJSON(t *testing.T) {
 	}
 
 	// Should return original on error (graceful fallback)
-	result, err := InjectMemories(invalidRequest, memories)
+	result, err := InjectMemories(invalidRequest, memories, "test-model")
 	require.NoError(t, err, "should not return error, just fallback")
 	assert.Equal(t, invalidRequest, result, "should return original on parse error")
 }
@@ -1003,7 +1003,7 @@ func TestInjectMemories_EmptyMessages(t *testing.T) {
 		{Memory: &memory.Memory{Content: "test memory"}, Score: 0.8},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	var parsed map[string]interface{}
@@ -1027,7 +1027,7 @@ func TestInjectMemories_NilMemoryContent(t *testing.T) {
 		{Memory: &memory.Memory{Content: "valid memory"}, Score: 0.6},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	var parsed map[string]interface{}
@@ -1128,7 +1128,7 @@ func TestInjectMemories_RealisticScenario(t *testing.T) {
 		},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	// Parse and validate
@@ -1168,7 +1168,7 @@ func TestInjectMemories_PreservesMessageOrder(t *testing.T) {
 		{Memory: &memory.Memory{Content: "Memory content"}, Score: 0.8},
 	}
 
-	result, err := InjectMemories(originalRequest, memories)
+	result, err := InjectMemories(originalRequest, memories, "test-model")
 	require.NoError(t, err)
 
 	var parsed map[string]interface{}

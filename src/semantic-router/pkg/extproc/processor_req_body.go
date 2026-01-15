@@ -597,12 +597,21 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 		return requestBody, nil
 	}
 
-	// Step 5: Search Milvus for relevant memories
+	// Step 5: Get the model that will be used for this request
+	// This is used to prioritize memories that match the model's format
+	modelSource := openAIRequest.Model
+	if modelSource == "" {
+		// Fallback to original model if available
+		modelSource = ctx.RequestModel
+	}
+
+	// Step 6: Search Milvus for relevant memories
 	retrieveOpts := memory.RetrieveOptions{
-		Query:     searchQuery,
-		UserID:    userID,
-		Limit:     r.Config.Memory.DefaultRetrievalLimit,
-		Threshold: r.Config.Memory.DefaultSimilarityThreshold,
+		Query:       searchQuery,
+		UserID:      userID,
+		ModelSource: modelSource, // Prioritize memories from this model
+		Limit:       r.Config.Memory.DefaultRetrievalLimit,
+		Threshold:   r.Config.Memory.DefaultSimilarityThreshold,
 	}
 
 	// Apply defaults if not configured
@@ -626,7 +635,8 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 	logging.Infof("Memory: Retrieved %d memories for query: %s", len(memories), searchQuery)
 
 	// Step 6: Inject memories into request body
-	modifiedBody, err := InjectMemories(requestBody, memories)
+	// Pass modelSource for tracking which model uses these memories
+	modifiedBody, err := InjectMemories(requestBody, memories, modelSource)
 	if err != nil {
 		return requestBody, fmt.Errorf("memory injection failed: %w", err)
 	}

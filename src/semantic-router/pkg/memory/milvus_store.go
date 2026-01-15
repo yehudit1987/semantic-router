@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -310,6 +311,11 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 			memory.Source = source
 		}
 
+		// Extract model_source from metadata if available
+		if modelSource, ok := hit.Metadata["model_source"].(string); ok {
+			memory.ModelSource = modelSource
+		}
+
 		// Extract importance from metadata if available
 		// Handle both float64 (from JSON) and string (like "high" - skip non-numeric)
 		if importance, ok := hit.Metadata["importance"].(float64); ok {
@@ -325,6 +331,37 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 		}
 
 		results = append(results, result)
+	}
+
+	// Sort results with model_source prioritization
+	// Memories with matching model_source get a boost in ranking
+	if opts.ModelSource != "" && len(results) > 1 {
+		sort.Slice(results, func(i, j int) bool {
+			scoreI := results[i].Score
+			scoreJ := results[j].Score
+
+			// Boost score for matching model_source (add 0.1 to similarity)
+			if results[i].Memory != nil && results[i].Memory.ModelSource == opts.ModelSource {
+				scoreI += 0.1
+			}
+			if results[j].Memory != nil && results[j].Memory.ModelSource == opts.ModelSource {
+				scoreJ += 0.1
+			}
+
+			// If boosted scores are equal, prefer the one with matching model_source
+			if scoreI == scoreJ {
+				hasModelI := results[i].Memory != nil && results[i].Memory.ModelSource == opts.ModelSource
+				hasModelJ := results[j].Memory != nil && results[j].Memory.ModelSource == opts.ModelSource
+				if hasModelI && !hasModelJ {
+					return true
+				}
+				if !hasModelI && hasModelJ {
+					return false
+				}
+			}
+
+			return scoreI > scoreJ
+		})
 	}
 
 	logging.Debugf("MilvusStore.Retrieve: returning %d results (filtered from %d candidates)",
@@ -424,6 +461,7 @@ func (m *MilvusStore) Store(ctx context.Context, memory *Memory) error {
 		"user_id":      memory.UserID,
 		"project_id":   memory.ProjectID,
 		"source":       memory.Source,
+		"model_source": memory.ModelSource, // Store model_source for prioritization
 		"importance":   memory.Importance,
 		"access_count": memory.AccessCount,
 	}

@@ -26,6 +26,8 @@ var _ = Describe("Tool Selection Request Filter", func() {
 		testToolsDB []tools.ToolEntry
 	)
 
+	var modelFactoryInitialized bool
+
 	BeforeEach(func() {
 		// Initialize BERT model for embeddings
 		err := candle_binding.InitModel("sentence-transformers/all-MiniLM-L6-v2", true)
@@ -47,6 +49,7 @@ var _ = Describe("Tool Selection Request Filter", func() {
 		}
 
 		// Initialize ModelFactory if at least one model is available
+		modelFactoryInitialized = false
 		if qwen3Exists || gemmaExists {
 			qwen3ToUse := ""
 			gemmaToUse := ""
@@ -62,6 +65,8 @@ var _ = Describe("Tool Selection Request Filter", func() {
 				// Log warning but don't fail - tests will skip if ModelFactory is not initialized
 				GinkgoWriter.Printf("Warning: Failed to initialize embedding models: %v\n", err)
 				GinkgoWriter.Printf("Tools tests requiring ModelFactory will be skipped\n")
+			} else {
+				modelFactoryInitialized = true
 			}
 		}
 
@@ -139,8 +144,19 @@ var _ = Describe("Tool Selection Request Filter", func() {
 		os.RemoveAll(tempDir)
 	})
 
+	// Helper function to check if ModelFactory is initialized
+	isModelFactoryInitialized := func() bool {
+		return modelFactoryInitialized
+	}
+
 	Describe("Tools Database Loading", func() {
 		Context("with valid tools database path", func() {
+			BeforeEach(func() {
+				if !isModelFactoryInitialized() {
+					Skip("ModelFactory not initialized - skipping tests in this context")
+				}
+			})
+
 			It("should load tools from toolsDBPath successfully", func() {
 				cfg.ToolSelection.Tools.Enabled = true
 				cfg.ToolSelection.Tools.ToolsDBPath = toolsDBPath
@@ -204,6 +220,9 @@ var _ = Describe("Tool Selection Request Filter", func() {
 
 	Describe("Top-K Tool Selection", func() {
 		BeforeEach(func() {
+			if !isModelFactoryInitialized() {
+				Skip("ModelFactory not initialized - skipping tests in this suite")
+			}
 			cfg.ToolSelection.Tools.Enabled = true
 			cfg.ToolSelection.Tools.ToolsDBPath = toolsDBPath
 			cfg.ToolSelection.Tools.SimilarityThreshold = &[]float32{0.2}[0]
@@ -262,6 +281,9 @@ var _ = Describe("Tool Selection Request Filter", func() {
 
 	Describe("Similarity Threshold Filtering", func() {
 		BeforeEach(func() {
+			if !isModelFactoryInitialized() {
+				Skip("ModelFactory not initialized - skipping tests in this suite")
+			}
 			cfg.ToolSelection.Tools.Enabled = true
 			cfg.ToolSelection.Tools.ToolsDBPath = toolsDBPath
 			cfg.ToolSelection.Tools.TopK = 5
@@ -405,6 +427,12 @@ var _ = Describe("Tool Selection Request Filter", func() {
 		})
 
 		Context("with fallbackToEmpty=false", func() {
+			BeforeEach(func() {
+				if !isModelFactoryInitialized() {
+					Skip("ModelFactory not initialized - skipping tests in this context")
+				}
+			})
+
 			It("should keep original tools when no tools meet threshold", func() {
 				cfg.ToolSelection.Tools.FallbackToEmpty = false
 				cfg.ToolSelection.Tools.SimilarityThreshold = &[]float32{0.99}[0]
@@ -433,6 +461,9 @@ var _ = Describe("Tool Selection Request Filter", func() {
 
 	Describe("Tool Selection Integration", func() {
 		BeforeEach(func() {
+			if !isModelFactoryInitialized() {
+				Skip("ModelFactory not initialized - skipping tests in this suite")
+			}
 			cfg.ToolSelection.Tools.Enabled = true
 			cfg.ToolSelection.Tools.ToolsDBPath = toolsDBPath
 			cfg.ToolSelection.Tools.TopK = 3
@@ -576,6 +607,9 @@ var _ = Describe("Tool Selection Request Filter", func() {
 
 	Describe("Category and Tag-Based Filtering", func() {
 		BeforeEach(func() {
+			if !isModelFactoryInitialized() {
+				Skip("ModelFactory not initialized - skipping tests in this suite")
+			}
 			cfg.ToolSelection.Tools.Enabled = true
 			cfg.ToolSelection.Tools.ToolsDBPath = toolsDBPath
 			cfg.ToolSelection.Tools.TopK = 5

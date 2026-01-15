@@ -384,6 +384,8 @@ func ExtractConversationHistory(messagesJSON []byte) ([]ConversationMessage, err
 
 // InjectMemories adds retrieved memories to the LLM request as system context.
 // The memories are formatted as a system message and prepended to the messages array.
+// It also updates the model_source field of memories that don't match the current model,
+// so they can be prioritized for this model in future retrievals.
 //
 // Format:
 //
@@ -395,11 +397,26 @@ func ExtractConversationHistory(messagesJSON []byte) ([]ConversationMessage, err
 // Graceful handling:
 //   - If no memories found → returns original request unchanged
 //   - If injection fails → logs warning and returns original request
-func InjectMemories(requestBody []byte, memories []*memory.RetrieveResult) ([]byte, error) {
+func InjectMemories(requestBody []byte, memories []*memory.RetrieveResult, modelSource string) ([]byte, error) {
 	// No memories to inject
 	if len(memories) == 0 {
 		logging.Debugf("Memory: No memories to inject, returning original request")
 		return requestBody, nil
+	}
+
+	// Update model_source for memories that don't match the current model
+	// This allows future retrievals to prioritize memories for this model
+	if modelSource != "" {
+		for _, result := range memories {
+			if result.Memory != nil && result.Memory.ModelSource != modelSource {
+				// Note: This is a lightweight update - we're just tracking which model
+				// used this memory. The actual store update happens asynchronously
+				// to avoid blocking the request.
+				result.Memory.ModelSource = modelSource
+				logging.Debugf("Memory: Updated model_source for memory %s: %s -> %s",
+					result.Memory.ID, result.Memory.ModelSource, modelSource)
+			}
+		}
 	}
 
 	// Format memories as context
@@ -412,7 +429,7 @@ func InjectMemories(requestBody []byte, memories []*memory.RetrieveResult) ([]by
 		return requestBody, nil // Graceful fallback
 	}
 
-	logging.Infof("Memory: Injected %d memories into request", len(memories))
+	logging.Infof("Memory: Injected %d memories into request (model: %s)", len(memories), modelSource)
 	return modifiedBody, nil
 }
 

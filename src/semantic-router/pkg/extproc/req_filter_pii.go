@@ -23,7 +23,7 @@ func (r *OpenAIRouter) performPIIDetection(ctx *RequestContext, userContent stri
 	}
 
 	// Detect PII in content
-	detectedPII := r.detectPIIWithTracing(ctx, userContent, nonUserMessages, decisionName)
+	detectedPII := r.detectPIIWithTracing(ctx, userContent, nonUserMessages)
 	if len(detectedPII) == 0 {
 		return nil
 	}
@@ -58,7 +58,7 @@ func (r *OpenAIRouter) isPIIDetectionEnabled(decisionName string) bool {
 }
 
 // detectPIIWithTracing performs PII detection with tracing and logging
-func (r *OpenAIRouter) detectPIIWithTracing(ctx *RequestContext, userContent string, nonUserMessages []string, categoryName string) []string {
+func (r *OpenAIRouter) detectPIIWithTracing(ctx *RequestContext, userContent string, nonUserMessages []string) []string {
 	allContent := pii.ExtractAllContent(userContent, nonUserMessages)
 
 	// Start PII detection span

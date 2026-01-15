@@ -97,7 +97,7 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 
 	// Perform decision evaluation and model selection once at the beginning
 	// Use decision-based routing if decisions are configured, otherwise fall back to category-based
-	decisionName, classificationConfidence, reasoningDecision, selectedModel := r.performDecisionEvaluationAndModelSelection(originalModel, userContent, nonUserMessages, ctx)
+	decisionName, _, reasoningDecision, selectedModel := r.performDecisionEvaluationAndModelSelection(originalModel, userContent, nonUserMessages, ctx)
 
 	// Perform security checks with decision-specific settings
 	if response, shouldReturn := r.performSecurityChecks(ctx, userContent, nonUserMessages, decisionName); shouldReturn {
@@ -129,12 +129,12 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 	}
 
 	// Handle model selection and routing with pre-computed classification results and selected model
-	return r.handleModelRouting(openAIRequest, originalModel, decisionName, classificationConfidence, reasoningDecision, selectedModel, ctx)
+	return r.handleModelRouting(openAIRequest, originalModel, decisionName, reasoningDecision, selectedModel, ctx)
 }
 
 // handleModelRouting handles model selection and routing logic
-// decisionName, classificationConfidence, reasoningDecision, and selectedModel are pre-computed from ProcessRequest
-func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.ChatCompletionNewParams, originalModel string, decisionName string, classificationConfidence float64, reasoningDecision entropy.ReasoningDecision, selectedModel string, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+// decisionName, reasoningDecision, and selectedModel are pre-computed from ProcessRequest
+func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.ChatCompletionNewParams, originalModel string, decisionName string, reasoningDecision entropy.ReasoningDecision, selectedModel string, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
 	response := &ext_proc.ProcessingResponse{
 		Response: &ext_proc.ProcessingResponse_RequestBody{
 			RequestBody: &ext_proc.BodyResponse{
@@ -194,7 +194,7 @@ func (r *OpenAIRouter) handleAutoModelRouting(openAIRequest *openai.ChatCompleti
 	response = r.createRoutingResponse(matchedModel, selectedEndpoint, modifiedBody, ctx)
 
 	// Log routing decision
-	r.logRoutingDecision(ctx, "auto_routing", originalModel, matchedModel, decisionName, reasoningDecision.UseReasoning, selectedEndpoint)
+	r.logRoutingDecision(ctx, "auto_routing", originalModel, matchedModel, decisionName, reasoningDecision.UseReasoning)
 
 	// Handle route cache clearing
 	if r.shouldClearRouteCache() {
@@ -234,7 +234,7 @@ func (r *OpenAIRouter) handleSpecifiedModelRouting(openAIRequest *openai.ChatCom
 	}
 
 	// Log routing decision
-	r.logRoutingDecision(ctx, "model_specified", originalModel, originalModel, "", false, selectedEndpoint)
+	r.logRoutingDecision(ctx, "model_specified", originalModel, originalModel, "", false)
 
 	// Save the actual model for token tracking
 	ctx.RequestModel = originalModel
@@ -626,13 +626,7 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 	logging.Infof("Memory: Retrieved %d memories for query: %s", len(memories), searchQuery)
 
 	// Step 6: Inject memories into request body
-	// Convert []RetrieveResult to []*RetrieveResult
-	memoryPtrs := make([]*memory.RetrieveResult, len(memories))
-	for i := range memories {
-		memoryPtrs[i] = &memories[i]
-	}
-
-	modifiedBody, err := InjectMemories(requestBody, memoryPtrs)
+	modifiedBody, err := InjectMemories(requestBody, memories)
 	if err != nil {
 		return requestBody, fmt.Errorf("memory injection failed: %w", err)
 	}

@@ -10,8 +10,8 @@ This document describes a **Proof of Concept** for Agentic Memory in the Semanti
 
 | Capability | Description |
 |------------|-------------|
-| **Memory Retrieval** | Embedding-based search with simple pre-filtering and model-based prioritization |
-| **Memory Saving** | LLM-based extraction of facts and procedures with model source tracking |
+| **Memory Retrieval** | Embedding-based search with simple pre-filtering |
+| **Memory Saving** | LLM-based extraction of facts and procedures |
 | **Cross-Session Persistence** | Memories stored in Milvus (survives restarts; production backup/HA not tested) |
 | **User Isolation** | Memories scoped per user_id (see note below) |
 
@@ -32,7 +32,6 @@ This document describes a **Proof of Concept** for Agentic Memory in the Semanti
 2. **Context window** from history for query disambiguation
 3. **LLM extracts facts** and classifies type when saving
 4. **Threshold-based filtering** on search results
-5. **Model-based prioritization** boosts memories matching the active model
 
 ### Explicit Assumptions (POC)
 
@@ -372,17 +371,9 @@ RESPONSE PHASE:
 │     Keep only results with similarity > 0.6                             │
 │     ⚠️ Threshold is configurable; 0.6 is starting value, tune via logs  │
 │                                                                         │
-│  5. MODEL-BASED PRIORITIZATION (optional)                               │
-│     ─────────────────────────────────────                               │
-│     If model_source is specified:                                       │
-│     - Boost memories with matching model_source by +0.1 similarity      │
-│     - Prefer matching memories in tie-break scenarios                   │
-│     - Enables model-specific memory formatting                          │
-│                                                                         │
-│  6. INJECT INTO LLM CONTEXT                                             │
+│  5. INJECT INTO LLM CONTEXT                                             │
 │     ────────────────────────                                            │
 │     Add as system message: "User's relevant context: ..."               │
-│     Tag memories with current model for future prioritization           │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -476,57 +467,6 @@ func isGreeting(query string) bool {
 }
 ```
 
-#### Model-Based Prioritization
-
-Different LLM models may have different input format expectations or may benefit from memories that were originally created or used with that specific model. The `model_source` metadata field enables model-specific memory prioritization.
-
-**How it works:**
-
-1. **Tagging during storage:** When memories are extracted from conversation history, they are tagged with the `model_source` field indicating which model generated the response.
-
-2. **Tagging during usage:** When memories are injected into a request, they are updated to track which model used them, allowing the system to learn which memories work best with which models.
-
-3. **Prioritization during retrieval:** When retrieving memories for a specific model:
-   - Memories with matching `model_source` receive a +0.1 boost to their similarity score
-   - If boosted scores are equal, memories with matching `model_source` are preferred
-   - This ensures models receive memories that are more likely to be formatted appropriately for their input expectations
-
-**Example:**
-
-```
-Memory stored with model_source="qwen3":
-  "User's budget for Hawaii trip is $10,000"
-
-Request to model="qwen3":
-  → Memory gets +0.1 boost → Higher ranking → More likely to be retrieved
-
-Request to model="gemma":
-  → Memory gets no boost → Lower ranking → Less likely to be retrieved
-```
-
-**Backward Compatibility:** If `model_source` is not specified in retrieval options, no prioritization is applied and memories are ranked solely by semantic similarity (existing behavior).
-
-**Implementation:**
-
-```go
-// RetrieveOptions includes optional ModelSource for prioritization
-type RetrieveOptions struct {
-    Query       string
-    UserID      string
-    ModelSource string  // Optional: model for which memories are being retrieved
-    Limit       int
-    Threshold   float32
-}
-
-// In memory store Retrieve() method:
-// Boost score for matching model_source (add 0.1 to similarity)
-if opts.ModelSource != "" {
-    if results[i].Memory != nil && results[i].Memory.ModelSource == opts.ModelSource {
-        scoreI += 0.1
-    }
-}
-```
-
 #### Context Building
 
 ```go
@@ -611,11 +551,10 @@ func (f *MemoryFilter) RetrieveMemories(
     
     // 3. Search Milvus
     results, err := f.store.Retrieve(ctx, memory.RetrieveOptions{
-        Query:       searchQuery,
-        UserID:      userID,
-        ModelSource: ctx.RequestModel,
-        Limit:       5,
-        Threshold:   0.6,
+        Query:     searchQuery,
+        UserID:    userID,
+        Limit:     5,
+        Threshold: 0.6,
     })
     if err != nil {
         return nil, err
@@ -706,9 +645,7 @@ Memory extraction is triggered by three events:
 │                                                                         │
 │  4. STORE IN MILVUS                                                     │
 │     ───────────────                                                     │
-│     Memory { id, type, content, embedding, user_id, model_source,       │
-│              created_at }                                               │
-│     - model_source: Tagged with the model that generated the response   │
+│     Memory { id, type, content, embedding, user_id, created_at }        │
 │                                                                         │
 │  5. SESSION END (future): Create episodic summary                       │
 │     ─────────────────────────────────────────────                       │
@@ -744,7 +681,6 @@ func (e *MemoryExtractor) ProcessResponse(
     sessionID string,
     userID string,
     history []Message,
-    modelSource string,  // Model that generated the response
 ) error {
     e.mu.Lock()
     e.turnCounts[sessionID]++
@@ -981,7 +917,6 @@ type Memory struct {
     UserID      string         `json:"user_id"`
     ProjectID   string         `json:"project_id,omitempty"`
     Source      string         `json:"source,omitempty"`
-    ModelSource string         `json:"model_source,omitempty"`  
     CreatedAt   time.Time      `json:"created_at"`
     AccessCount int            `json:"access_count"`
     Importance  float32        `json:"importance"`
@@ -1204,14 +1139,6 @@ if err != nil {
 ---
 
 ## 14. Future Enhancements
-
-### Model-Specific Memory Features
-
-**Model-Specific Rephrasing:** Use `model_source` to rephrase memories to match a model's expected input format. For example, memories created with Qwen3 could be reformatted when retrieved for Gemma to match Gemma's preferred prompt structure.
-
-**Configurable Boost:** Make the 0.1 similarity boost value configurable per model or globally. Some models may benefit from stronger or weaker prioritization.
-
-**Model Affinity Learning:** Track which memories perform best with which models (e.g., via feedback signals) and adjust prioritization accordingly. This could evolve into a learned model-memory affinity matrix.
 
 ### Context Compression (High Priority)
 

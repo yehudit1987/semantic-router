@@ -10,20 +10,20 @@ This document describes a **Proof of Concept** for Agentic Memory in the Semanti
 
 | Capability | Description |
 |------------|-------------|
-| **Memory Retrieval** | Embedding-based search with simple pre-filtering |
-| **Memory Saving** | LLM-based extraction of facts and procedures |
+| **Memory Retrieval** | Embedding-based search with simple pre-filtering and model-based prioritization |
+| **Memory Saving** | LLM-based extraction of facts and procedures with model source tracking |
 | **Cross-Session Persistence** | Memories stored in Milvus (survives restarts; production backup/HA not tested) |
 | **User Isolation** | Memories scoped per user_id (see note below) |
 
 > **⚠️ User Isolation - Milvus Performance Note:**
-> 
+>
 > | Approach | POC | Production (10K+ users) |
 > |----------|-----|-------------------------|
 > | **Simple filter** | ✅ Filter by `user_id` after search | ❌ Degrades: searches all users, then filters |
 > | **Partition Key** | ❌ Overkill | ✅ Physical separation, O(log N) per user |
 > | **Scalar Index** | ❌ Overkill | ✅ Index on `user_id` for fast filtering |
-> 
-> **POC:** Uses simple metadata filtering (sufficient for testing).  
+>
+> **POC:** Uses simple metadata filtering (sufficient for testing).
 > **Production:** Configure `user_id` as Partition Key or Scalar Indexed Field in Milvus schema.
 
 ### Key Design Principles
@@ -32,6 +32,7 @@ This document describes a **Proof of Concept** for Agentic Memory in the Semanti
 2. **Context window** from history for query disambiguation
 3. **LLM extracts facts** and classifies type when saving
 4. **Threshold-based filtering** on search results
+5. **Model-based prioritization** boosts memories matching the active model
 
 ### Explicit Assumptions (POC)
 
@@ -118,8 +119,8 @@ Session B (March 20) - NEW SESSION:
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                          │                              │
 │                    ┌─────────────────────┴─────────────────────┐        │
-│                    │                                           │        │ 
-│          ┌─────────▼─────────┐                    ┌────────────▼───┐    │ 
+│                    │                                           │        │
+│          ┌─────────▼─────────┐                    ┌────────────▼───┐    │
 │          │ Memory Retrieval  │                    │ Memory Saving  │    │
 │          │  (request phase)  │                    │(response phase)│    │
 │          ├───────────────────┤                    ├────────────────┤    │
@@ -131,7 +132,7 @@ Session B (March 20) - NEW SESSION:
 │          └─────────┬─────────┘                    └────────┬───────┘    │
 │                    │                                       │            │
 │                    │         ┌──────────────┐              │            │
-│                    └────────►│    Milvus    │◄─────────────┘            │ 
+│                    └────────►│    Milvus    │◄─────────────┘            │
 │                              └──────────────┘                           │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -307,7 +308,7 @@ REQUEST PHASE:
 6.  Security Checks
 7.  PII Detection
 8.  Semantic Cache Check ───► if HIT → return cached
-9.  🆕 Memory Decision: 
+9.  🆕 Memory Decision:
     └── if (NOT Fact) AND (NOT Tool) AND (NOT Greeting) → continue
     └── else → skip to step 12
 10. 🆕 Build context + rewrite query          [~1-5ms]
@@ -371,9 +372,17 @@ RESPONSE PHASE:
 │     Keep only results with similarity > 0.6                             │
 │     ⚠️ Threshold is configurable; 0.6 is starting value, tune via logs  │
 │                                                                         │
-│  5. INJECT INTO LLM CONTEXT                                             │
+│  5. MODEL-BASED PRIORITIZATION (optional)                               │
+│     ─────────────────────────────────────                               │
+│     If model_source is specified:                                       │
+│     - Boost memories with matching model_source by +0.1 similarity      │
+│     - Prefer matching memories in tie-break scenarios                   │
+│     - Enables model-specific memory formatting                          │
+│                                                                         │
+│  6. INJECT INTO LLM CONTEXT                                             │
 │     ────────────────────────                                            │
 │     Add as system message: "User's relevant context: ..."               │
+│     Tag memories with current model for future prioritization           │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -399,7 +408,7 @@ func NewMemoryFilter(store memory.Store) *MemoryFilter {
 
 #### Memory Decision (Reuses Existing Pipeline)
 
-> **⚠️ Known Limitation:** The `IsFact` classifier was designed for general-knowledge fact-checking (e.g., "What is the capital of France?"). It may incorrectly classify personal-fact questions ("What is my budget?") as fact queries, causing memory to be skipped. 
+> **⚠️ Known Limitation:** The `IsFact` classifier was designed for general-knowledge fact-checking (e.g., "What is the capital of France?"). It may incorrectly classify personal-fact questions ("What is my budget?") as fact queries, causing memory to be skipped.
 >
 > **POC Mitigation:** We add a personal-indicator check. If query contains personal pronouns ("my", "I", "me"), we override `IsFact` and search memory anyway.
 >
@@ -413,25 +422,25 @@ func NewMemoryFilter(store memory.Store) *MemoryFilter {
 func shouldSearchMemory(ctx *RequestContext, query string) bool {
     // Check for personal indicators (overrides IsFact for personal questions)
     hasPersonalIndicator := containsPersonalPronoun(query)
-    
+
     // 1. Fact query → skip UNLESS it contains personal pronouns
     if ctx.IsFact && !hasPersonalIndicator {
         logging.Debug("Memory: Skipping - general fact query")
         return false
     }
-    
+
     // 2. Tool required → skip (tool provides answer)
     if ctx.RequiresTool {
         logging.Debug("Memory: Skipping - tool query")
         return false
     }
-    
+
     // 3. Greeting/social → skip (no context needed)
     if isGreeting(query) {
         logging.Debug("Memory: Skipping - greeting")
         return false
     }
-    
+
     // 4. Default: search memory (conservative - don't miss context)
     return true
 }
@@ -445,12 +454,12 @@ func containsPersonalPronoun(query string) bool {
 func isGreeting(query string) bool {
     // Match greetings that are ONLY greetings, not "Hi, what's my budget?"
     lower := strings.ToLower(strings.TrimSpace(query))
-    
+
     // Short greetings only (< 20 chars and matches pattern)
     if len(lower) > 20 {
         return false
     }
-    
+
     greetings := []string{
         `^(hi|hello|hey|howdy)[\s\!\.\,]*$`,
         `^(hi|hello|hey)[\s\,]*(there)?[\s\!\.\,]*$`,
@@ -467,6 +476,57 @@ func isGreeting(query string) bool {
 }
 ```
 
+#### Model-Based Prioritization
+
+Different LLM models may have different input format expectations or may benefit from memories that were originally created or used with that specific model. The `model_source` metadata field enables model-specific memory prioritization.
+
+**How it works:**
+
+1. **Tagging during storage:** When memories are extracted from conversation history, they are tagged with the `model_source` field indicating which model generated the response.
+
+2. **Tagging during usage:** When memories are injected into a request, they are updated to track which model used them, allowing the system to learn which memories work best with which models.
+
+3. **Prioritization during retrieval:** When retrieving memories for a specific model:
+   - Memories with matching `model_source` receive a +0.1 boost to their similarity score
+   - If boosted scores are equal, memories with matching `model_source` are preferred
+   - This ensures models receive memories that are more likely to be formatted appropriately for their input expectations
+
+**Example:**
+
+```
+Memory stored with model_source="qwen3":
+  "User's budget for Hawaii trip is $10,000"
+
+Request to model="qwen3":
+  → Memory gets +0.1 boost → Higher ranking → More likely to be retrieved
+
+Request to model="gemma":
+  → Memory gets no boost → Lower ranking → Less likely to be retrieved
+```
+
+**Backward Compatibility:** If `model_source` is not specified in retrieval options, no prioritization is applied and memories are ranked solely by semantic similarity (existing behavior).
+
+**Implementation:**
+
+```go
+// RetrieveOptions includes optional ModelSource for prioritization
+type RetrieveOptions struct {
+    Query       string
+    UserID      string
+    ModelSource string  // Optional: model for which memories are being retrieved
+    Limit       int
+    Threshold   float32
+}
+
+// In memory store Retrieve() method:
+// Boost score for matching model_source (add 0.1 to similarity)
+if opts.ModelSource != "" {
+    if results[i].Memory != nil && results[i].Memory.ModelSource == opts.ModelSource {
+        scoreI += 0.1
+    }
+}
+```
+
 #### Context Building
 
 ```go
@@ -477,11 +537,11 @@ func buildSearchQuery(history []Message, query string) string {
     if isSelfContained(query) {
         return query
     }
-    
+
     // MVP: Simple context prepend
     context := summarizeHistory(history)
     return query + " " + context
-    
+
     // v1 (future): LLM rewrite for vague queries
     // if isVague(query) {
     //     return rewriteWithLLM(history, query)
@@ -491,7 +551,7 @@ func buildSearchQuery(history []Message, query string) string {
 func isSelfContained(query string) bool {
     // Self-contained: "What's my budget for the Hawaii trip?"
     // NOT self-contained: "How much?", "And that one?", "What about it?"
-    
+
     vaguePatterns := []string{`^how much\??$`, `^what about`, `^and that`, `^this one`}
     for _, p := range vaguePatterns {
         if regexp.MustCompile(`(?i)`+p).MatchString(query) {
@@ -517,10 +577,10 @@ func summarizeHistory(history []Message) string {
 // v1: LLM-based query rewriting (future enhancement)
 func rewriteWithLLM(history []Message, query string) string {
     prompt := fmt.Sprintf(`Conversation context: %s
-    
+
 Rewrite this vague query to be self-contained: "%s"
 Return ONLY the rewritten query.`, summarizeHistory(history), query)
-    
+
     // Call LLM endpoint
     resp, _ := http.Post(llmEndpoint+"/v1/chat/completions", ...)
     return parseResponse(resp)
@@ -539,27 +599,28 @@ func (f *MemoryFilter) RetrieveMemories(
     userID string,
     history []Message,
 ) ([]*memory.RetrieveResult, error) {
-    
+
     // 1. Memory decision (skip if fact/tool/greeting)
     if !shouldSearchMemory(ctx, query) {
         logging.Debug("Memory: Skipping - not memory-relevant")
         return nil, nil
     }
-    
+
     // 2. Build search query (context prepend or LLM rewrite)
     searchQuery := buildSearchQuery(history, query)
-    
+
     // 3. Search Milvus
     results, err := f.store.Retrieve(ctx, memory.RetrieveOptions{
-        Query:     searchQuery,
-        UserID:    userID,
-        Limit:     5,
-        Threshold: 0.6,
+        Query:       searchQuery,
+        UserID:      userID,
+        ModelSource: ctx.RequestModel,
+        Limit:       5,
+        Threshold:   0.6,
     })
     if err != nil {
         return nil, err
     }
-    
+
     logging.Infof("Memory: Retrieved %d memories", len(results))
     return results, nil
 }
@@ -572,14 +633,14 @@ func (f *MemoryFilter) InjectMemories(
     if len(memories) == 0 {
         return requestBody, nil
     }
-    
+
     // Format memories as context
     var sb strings.Builder
     sb.WriteString("## User's Relevant Context\n\n")
     for _, mem := range memories {
         sb.WriteString(fmt.Sprintf("- %s\n", mem.Memory.Content))
     }
-    
+
     // Add as system message
     return injectSystemMessage(requestBody, sb.String())
 }
@@ -645,7 +706,9 @@ Memory extraction is triggered by three events:
 │                                                                         │
 │  4. STORE IN MILVUS                                                     │
 │     ───────────────                                                     │
-│     Memory { id, type, content, embedding, user_id, created_at }        │
+│     Memory { id, type, content, embedding, user_id, model_source,       │
+│              created_at }                                               │
+│     - model_source: Tagged with the model that generated the response   │
 │                                                                         │
 │  5. SESSION END (future): Create episodic summary                       │
 │     ─────────────────────────────────────────────                       │
@@ -670,7 +733,7 @@ type MemoryExtractor struct {
 }
 
 // ProcessResponse extracts and stores memories (runs async)
-// 
+//
 // Triggers (MVP: only first one implemented):
 //   - Every N turns (e.g., 10)       ← MVP
 //   - End of session                 ← Future: needs session end detection
@@ -681,32 +744,33 @@ func (e *MemoryExtractor) ProcessResponse(
     sessionID string,
     userID string,
     history []Message,
+    modelSource string,  // Model that generated the response
 ) error {
     e.mu.Lock()
     e.turnCounts[sessionID]++
     turnCount := e.turnCounts[sessionID]
     e.mu.Unlock()
-    
+
     // MVP: Only extract every N turns
     // Future: Also trigger on session end or context drift
     if turnCount % e.batchSize != 0 {
         return nil
     }
-    
+
     // Get recent batch
     batchStart := max(0, len(history) - e.batchSize - 5)
     batch := history[batchStart:]
-    
+
     // LLM extraction
     extracted, err := e.extractWithLLM(batch)
     if err != nil {
         return err
     }
-    
+
     // Store with deduplication
     for _, fact := range extracted {
         existing, similarity := e.findSimilar(ctx, userID, fact.Content, fact.Type)
-        
+
         if similarity > 0.9 && existing != nil {
             // Very similar → UPDATE existing memory
             existing.Content = fact.Content  // Use newer content
@@ -716,7 +780,7 @@ func (e *MemoryExtractor) ProcessResponse(
             }
             continue
         }
-        
+
         // similarity < 0.9 → CREATE new memory
         mem := &Memory{
             ID:        generateID("mem"),
@@ -726,12 +790,12 @@ func (e *MemoryExtractor) ProcessResponse(
             Source:    "conversation",
             CreatedAt: time.Now(),
         }
-        
+
         if err := e.store.Store(ctx, mem); err != nil {
             logging.Warnf("Failed to store memory: %v", err)
         }
     }
-    
+
     return nil
 }
 
@@ -756,7 +820,7 @@ func (e *MemoryExtractor) findSimilar(
 }
 
 // extractWithLLM uses LLM to extract facts
-// 
+//
 // ⚠️ POC Limitation: LLM extraction is best-effort. Failures are logged but do not
 // block the response. Incorrect extractions may occur.
 //
@@ -787,7 +851,7 @@ Return JSON array (empty if nothing to remember):
     // Call LLM with timeout
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    
+
     reqBody := map[string]interface{}{
         "model": "qwen3",
         "messages": []map[string]string{
@@ -795,31 +859,31 @@ Return JSON array (empty if nothing to remember):
         },
     }
     jsonBody, _ := json.Marshal(reqBody)
-    
+
     req, _ := http.NewRequestWithContext(ctx, "POST",
         e.llmEndpoint+"/v1/chat/completions",
         bytes.NewReader(jsonBody))
     req.Header.Set("Content-Type", "application/json")
-    
+
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
         logging.Warnf("Memory extraction LLM call failed: %v", err)
         return nil, err  // Caller handles gracefully
     }
     defer resp.Body.Close()
-    
+
     if resp.StatusCode != 200 {
         logging.Warnf("Memory extraction LLM returned %d", resp.StatusCode)
         return nil, fmt.Errorf("LLM returned %d", resp.StatusCode)
     }
-    
+
     facts, err := parseExtractedFacts(resp.Body)
     if err != nil {
         // JSON parse error - LLM returned malformed output
         logging.Warnf("Memory extraction parse failed: %v", err)
         return nil, err  // Skip this batch, don't store garbage
     }
-    
+
     return facts, nil
 }
 ```
@@ -917,6 +981,7 @@ type Memory struct {
     UserID      string         `json:"user_id"`
     ProjectID   string         `json:"project_id,omitempty"`
     Source      string         `json:"source,omitempty"`
+    ModelSource string         `json:"model_source,omitempty"`
     CreatedAt   time.Time      `json:"created_at"`
     AccessCount int            `json:"access_count"`
     Importance  float32        `json:"importance"`
@@ -936,11 +1001,11 @@ type Store interface {
     Update(ctx context.Context, id string, memory *Memory) error             // Modify existing
     Forget(ctx context.Context, id string) error                             // Delete by ID
     ForgetByScope(ctx context.Context, scope MemoryScope) error              // Delete by scope
-    
+
     // Utility
     IsEnabled() bool
     Close() error
-    
+
     // Future Operations (not yet implemented)
     // Consolidate(ctx context.Context, memoryIDs []string) (*Memory, error)  // Merge memories
     // Reflect(ctx context.Context, scope MemoryScope) ([]*Insight, error)    // Generate insights
@@ -1002,7 +1067,7 @@ type MemoryContext struct {
 memory:
   enabled: true
   store_backend: "milvus"  # or "memory" for development
-  
+
   milvus:
     address: "milvus:19530"
     collection: "agentic_memory"
@@ -1010,16 +1075,16 @@ memory:
     ef_construction: 256
     m: 16
     ef: 64
-  
+
   # Embedding model for memory
   embedding:
     model: "all-MiniLM-L6-v2"   # 384-dim, optimized for semantic similarity
     dimension: 384
-  
+
   # Retrieval settings
   default_retrieval_limit: 5
   default_similarity_threshold: 0.6   # Tunable; start conservative
-  
+
   # Extraction settings (for saving)
   extraction:
     enabled: true
@@ -1038,17 +1103,17 @@ memory:
 | `timeout_seconds: 30` | Default | Prevent extraction from blocking indefinitely |
 
 > **Embedding Model Choice:**
-> 
+>
 > | Model | Dimension | Pros | Cons |
 > |-------|-----------|------|------|
 > | **all-MiniLM-L6-v2** (POC choice) | 384 | Better semantic similarity, forgiving on wording, ideal for memory retrieval & deduplication | Requires loading separate model |
 > | Qwen3-Embedding-0.6B (existing) | 1024 | Already loaded for semantic cache, no extra memory | More sensitive to exact wording, may miss similar memories |
-> 
+>
 > **Why 384-dim for Memory?** Lower dimensions capture high-level semantic meaning and are less sensitive to specific details (numbers, names). This is beneficial for:
 > - **Retrieval**: "What's my budget?" matches "Hawaii trip budget is $10K" even with different wording
 > - **Deduplication**: "budget is $10K" and "budget is now $15K" recognized as same topic (update value)
 > - **Cross-session**: Wording naturally differs between sessions
-> 
+>
 > **Alternative:** Reusing Qwen3-Embedding (1024-dim) is possible to avoid loading a second model. Trade-off is slightly stricter matching which may increase false negatives.
 
 ---
@@ -1139,6 +1204,14 @@ if err != nil {
 ---
 
 ## 14. Future Enhancements
+
+### Model-Specific Memory Features
+
+**Model-Specific Rephrasing:** Use `model_source` to rephrase memories to match a model's expected input format. For example, memories created with Qwen3 could be reformatted when retrieved for Gemma to match Gemma's preferred prompt structure.
+
+**Configurable Boost:** Make the 0.1 similarity boost value configurable per model or globally. Some models may benefit from stronger or weaker prioritization.
+
+**Model Affinity Learning:** Track which memories perform best with which models (e.g., via feedback signals) and adjust prioritization accordingly. This could evolve into a learned model-memory affinity matrix.
 
 ### Context Compression (High Priority)
 
@@ -1314,7 +1387,7 @@ func buildSearchQuery(history []Message, query string) string {
 }
 ```
 
-**Pros:** Fast, simple  
+**Pros:** Fast, simple
 **Cons:** May include irrelevant terms
 
 #### Option 2: LLM Query Rewriting
@@ -1331,7 +1404,7 @@ func rewriteQuery(history []Message, query string) string {
 // "How much?" → "What is the budget for the Hawaii vacation?"
 ```
 
-**Pros:** Natural queries, better embedding match  
+**Pros:** Natural queries, better embedding match
 **Cons:** LLM latency, cost
 
 #### Option 3: HyDE (Hypothetical Document Embeddings)
@@ -1358,7 +1431,7 @@ func hydeRewrite(query string, history []Message) string {
 // "How much?" → "The budget for the Hawaii trip is approximately $10,000"
 ```
 
-**Pros:** Best retrieval quality (bridges question-to-document style gap)  
+**Pros:** Best retrieval quality (bridges question-to-document style gap)
 **Cons:** Highest latency (~200ms), LLM cost
 
 #### Recommendation
@@ -1387,8 +1460,8 @@ func hydeRewrite(query string, history []Message) string {
 
 ---
 
-*Document Author: [Yehudit Kerido, Marina Koushnir]*  
-*Last Updated: December 2025*  
-*Status: POC DESIGN - v3 (Review-Addressed)*  
+*Document Author: [Yehudit Kerido, Marina Koushnir]*
+*Last Updated: December 2025*
+*Status: POC DESIGN - v3 (Review-Addressed)*
 *Based on: [Issue #808 - Explore Agentic Memory in Response API](https://github.com/vllm-project/semantic-router/issues/808)*
 

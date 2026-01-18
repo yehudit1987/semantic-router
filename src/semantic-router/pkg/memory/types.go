@@ -64,6 +64,11 @@ type Memory struct {
 	// Source indicates where this memory came from
 	Source string `json:"source,omitempty"`
 
+	// ModelSource is the model that created or last used this memory.
+	// When retrieving memories for a specific model, memories with matching
+	// ModelSource are prioritized. This allows model-specific memory formatting.
+	ModelSource string `json:"model_source,omitempty"`
+
 	// CreatedAt is when the memory was first stored
 	CreatedAt time.Time `json:"created_at"`
 
@@ -120,6 +125,11 @@ type RetrieveOptions struct {
 
 	// Threshold is the minimum similarity score (range 0.0 to 1.0, default: 0.6)
 	Threshold float32
+
+	// ModelSource is the model for which memories are being retrieved.
+	// Memories with matching ModelSource will be prioritized in results.
+	// If empty, no model-based prioritization is applied.
+	ModelSource string
 }
 
 // DefaultMemoryConfig returns a default memory configuration

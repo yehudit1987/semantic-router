@@ -121,9 +121,35 @@ func (s *InMemoryStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*
 		})
 	}
 
-	// Sort by similarity (descending)
+	// Sort by similarity with model_source prioritization
+	// Memories with matching model_source get a boost in ranking
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		scoreI := results[i].Score
+		scoreJ := results[j].Score
+
+		// Boost score for matching model_source (add 0.1 to similarity)
+		if opts.ModelSource != "" {
+			if results[i].Memory != nil && results[i].Memory.ModelSource == opts.ModelSource {
+				scoreI += 0.1
+			}
+			if results[j].Memory != nil && results[j].Memory.ModelSource == opts.ModelSource {
+				scoreJ += 0.1
+			}
+		}
+
+		// If boosted scores are equal, prefer the one with matching model_source
+		if scoreI == scoreJ && opts.ModelSource != "" {
+			hasModelI := results[i].Memory != nil && results[i].Memory.ModelSource == opts.ModelSource
+			hasModelJ := results[j].Memory != nil && results[j].Memory.ModelSource == opts.ModelSource
+			if hasModelI && !hasModelJ {
+				return true
+			}
+			if !hasModelI && hasModelJ {
+				return false
+			}
+		}
+
+		return scoreI > scoreJ
 	})
 
 	// Apply limit

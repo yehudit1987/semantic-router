@@ -225,11 +225,13 @@ func (e *MemoryExtractor) callLLMForExtraction(ctx context.Context, userPrompt s
 // ProcessResponse extracts and stores memories from conversation history.
 // It runs extraction every N turns (batchSize) to avoid excessive LLM calls.
 // This method combines extraction (using ExtractFacts) + storage with deduplication.
+// modelSource is the model that generated the response, used to tag memories for prioritization.
 func (e *MemoryExtractor) ProcessResponse(
 	ctx context.Context,
 	sessionID string,
 	userID string,
 	history []Message,
+	modelSource string,
 ) error {
 	if e.store == nil || !e.store.IsEnabled() {
 		return nil // Store not enabled, skip extraction
@@ -277,7 +279,7 @@ func (e *MemoryExtractor) ProcessResponse(
 
 	// Store with deduplication
 	for _, fact := range extracted {
-		if err := e.storeWithDeduplication(ctx, userID, fact); err != nil {
+		if err := e.storeWithDeduplication(ctx, userID, fact, modelSource); err != nil {
 			logging.Warnf("Failed to store memory with deduplication: %v", err)
 			// Continue with other facts even if one fails
 		}
@@ -288,10 +290,12 @@ func (e *MemoryExtractor) ProcessResponse(
 
 // storeWithDeduplication stores a fact with deduplication logic.
 // It checks for similar existing memories and either updates or creates new ones.
+// modelSource is the model that generated the response, used to tag memories.
 func (e *MemoryExtractor) storeWithDeduplication(
 	ctx context.Context,
 	userID string,
 	fact ExtractedFact,
+	modelSource string,
 ) error {
 	// Check for similar memories using deduplication logic
 	result := CheckDeduplication(ctx, e.store, userID, fact.Content, fact.Type, e.dedupConfig)
@@ -302,46 +306,52 @@ func (e *MemoryExtractor) storeWithDeduplication(
 		if result.ExistingMemory == nil {
 			// Should not happen, but handle gracefully
 			logging.Warnf("Memory deduplication: update action but no existing memory")
-			return e.createNewMemory(ctx, userID, fact)
+			return e.createNewMemory(ctx, userID, fact, modelSource)
 		}
 
-		// Update existing memory with new content
+		// Update existing memory with new content and model_source
 		result.ExistingMemory.Content = fact.Content // Use newer content
 		result.ExistingMemory.UpdatedAt = time.Now()
+		if modelSource != "" {
+			result.ExistingMemory.ModelSource = modelSource // Update model_source
+		}
 
 		if err := e.store.Update(ctx, result.ExistingMemory.ID, result.ExistingMemory); err != nil {
 			return fmt.Errorf("failed to update memory: %w", err)
 		}
 
-		logging.Infof("Memory deduplication: UPDATED memory id=%s (similarity=%.3f)",
-			result.ExistingMemory.ID, result.Similarity)
+		logging.Infof("Memory deduplication: UPDATED memory id=%s (similarity=%.3f, model=%s)",
+			result.ExistingMemory.ID, result.Similarity, modelSource)
 		return nil
 
 	case "create":
 		// Create new memory (either no similar found, or in gray zone)
-		return e.createNewMemory(ctx, userID, fact)
+		return e.createNewMemory(ctx, userID, fact, modelSource)
 
 	default:
 		// Unknown action - default to create
 		logging.Warnf("Memory deduplication: unknown action '%s', defaulting to create", result.Action)
-		return e.createNewMemory(ctx, userID, fact)
+		return e.createNewMemory(ctx, userID, fact, modelSource)
 	}
 }
 
 // createNewMemory creates a new memory from an extracted fact.
+// modelSource is the model that generated the response, used to tag the memory.
 func (e *MemoryExtractor) createNewMemory(
 	ctx context.Context,
 	userID string,
 	fact ExtractedFact,
+	modelSource string,
 ) error {
 	mem := &Memory{
-		ID:         generateMemoryID(),
-		Type:       fact.Type,
-		Content:    fact.Content,
-		UserID:     userID,
-		Source:     "conversation",
-		CreatedAt:  time.Now(),
-		Importance: 0.5, // Default importance
+		ID:          generateMemoryID(),
+		Type:        fact.Type,
+		Content:     fact.Content,
+		UserID:      userID,
+		Source:      "conversation",
+		ModelSource: modelSource, // Tag with the model that created this memory
+		CreatedAt:   time.Now(),
+		Importance:  0.5, // Default importance
 	}
 
 	if err := e.store.Store(ctx, mem); err != nil {

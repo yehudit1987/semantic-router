@@ -5,6 +5,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestMain(m *testing.M) {
 	// Initialize embedding model for tests
 	err := candle_binding.InitModel("sentence-transformers/all-MiniLM-L6-v2", true)
 	if err != nil {
-		os.Exit(1)
+		log.Fatalf("Failed to initialize BERT model for tests: %v. Make sure models are downloaded.", err)
 	}
 
 	// Run tests
@@ -388,7 +389,7 @@ func TestMilvusStore_Retrieve_DefaultThreshold(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, results, 2, "Should filter out score 0.45 with default threshold 0.6")
-	
+
 	// Verify all results meet default threshold
 	for _, result := range results {
 		assert.GreaterOrEqual(t, result.Score, float32(0.6),
@@ -421,16 +422,16 @@ func TestMilvusStore_Retrieve_ThresholdBoundary(t *testing.T) {
 		Query: "test", UserID: "u1", Threshold: 0.6,
 	})
 	require.NoError(t, err)
-	
+
 	// Should include 0.85 and 0.60, exclude 0.59
 	require.Len(t, results, 2, "Should include scores >= 0.6")
-	
+
 	// Verify all results meet threshold
 	for _, result := range results {
 		assert.GreaterOrEqual(t, result.Score, float32(0.6),
 			"Result score %.4f should be >= 0.6 threshold", result.Score)
 	}
-	
+
 	// Verify specific scores
 	scores := make([]float32, len(results))
 	for i, r := range results {

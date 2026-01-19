@@ -2,24 +2,18 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
-	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func init() {
-	// Initialize BERT model for embeddings (required for similarity calculation)
-	err := candle_binding.InitModel("sentence-transformers/all-MiniLM-L6-v2", true)
-	if err != nil {
-		// Skip tests if model initialization fails (model might not be available)
-		fmt.Printf("Warning: Failed to initialize BERT model for tests: %v\n", err)
-		fmt.Printf("Tests will be skipped. Make sure models are downloaded.\n")
-	}
-}
+// Note: Model initialization is handled by TestMain in milvus_store_test.go
+// Since milvus_store_test.go has build tag (!windows && cgo), when both test files
+// are compiled together (on non-Windows with cgo), milvus_store_test.go's TestMain is used.
+// When milvus_store_test.go is not compiled (Windows or without cgo), model initialization
+// needs to be handled separately or tests will fail if model is not available.
 
 // =============================================================================
 // Similarity Threshold Tests
@@ -53,8 +47,8 @@ func TestInMemoryStore_Retrieve_DefaultThreshold(t *testing.T) {
 
 	// Test with default threshold (0.6) - should use 0.6 when Threshold is 0
 	results, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget for Hawaii?",
-		UserID:   "user1",
+		Query:     "What is my budget for Hawaii?",
+		UserID:    "user1",
 		Threshold: 0.6, // Explicit default threshold
 	})
 	require.NoError(t, err)
@@ -93,8 +87,8 @@ func TestInMemoryStore_Retrieve_FilterByThreshold(t *testing.T) {
 
 	// Test with threshold 0.6 - should filter out low similarity results
 	results, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget for Hawaii?",
-		UserID:   "user1",
+		Query:     "What is my budget for Hawaii?",
+		UserID:    "user1",
 		Threshold: 0.6,
 	})
 	require.NoError(t, err)
@@ -125,8 +119,8 @@ func TestInMemoryStore_Retrieve_ThresholdBoundary(t *testing.T) {
 
 	// Test with threshold exactly at 0.6
 	results, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget for Hawaii?",
-		UserID:   "user1",
+		Query:     "What is my budget for Hawaii?",
+		UserID:    "user1",
 		Threshold: 0.6,
 	})
 	require.NoError(t, err)
@@ -139,8 +133,8 @@ func TestInMemoryStore_Retrieve_ThresholdBoundary(t *testing.T) {
 
 	// Test with threshold slightly above (0.61) - may filter out some results
 	results2, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget for Hawaii?",
-		UserID:   "user1",
+		Query:     "What is my budget for Hawaii?",
+		UserID:    "user1",
 		Threshold: 0.61,
 	})
 	require.NoError(t, err)
@@ -194,24 +188,24 @@ func TestInMemoryStore_Retrieve_DifferentThresholdValues(t *testing.T) {
 
 	// Test with low threshold (0.3) - should return more results
 	resultsLow, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    query,
-		UserID:   "user1",
+		Query:     query,
+		UserID:    "user1",
 		Threshold: 0.3,
 	})
 	require.NoError(t, err)
 
 	// Test with default threshold (0.6) - should return fewer results
 	resultsDefault, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    query,
-		UserID:   "user1",
+		Query:     query,
+		UserID:    "user1",
 		Threshold: 0.6,
 	})
 	require.NoError(t, err)
 
 	// Test with high threshold (0.8) - should return even fewer results
 	resultsHigh, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    query,
-		UserID:   "user1",
+		Query:     query,
+		UserID:    "user1",
 		Threshold: 0.8,
 	})
 	require.NoError(t, err)
@@ -251,8 +245,8 @@ func TestInMemoryStore_Retrieve_ThresholdZero(t *testing.T) {
 
 	// Test with threshold 0 - should return all results (no filtering)
 	results, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget?",
-		UserID:   "user1",
+		Query:     "What is my budget?",
+		UserID:    "user1",
 		Threshold: 0.0,
 	})
 	require.NoError(t, err)
@@ -278,8 +272,8 @@ func TestInMemoryStore_Retrieve_ThresholdVeryHigh(t *testing.T) {
 
 	// Test with very high threshold (0.99) - may return no results
 	results, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget for Hawaii?",
-		UserID:   "user1",
+		Query:     "What is my budget for Hawaii?",
+		UserID:    "user1",
 		Threshold: 0.99,
 	})
 	require.NoError(t, err)
@@ -318,8 +312,8 @@ func TestInMemoryStore_Retrieve_ThresholdWithMultipleUsers(t *testing.T) {
 
 	// Test threshold filtering with user isolation
 	results, err := store.Retrieve(ctx, RetrieveOptions{
-		Query:    "What is my budget for Hawaii?",
-		UserID:   "user1",
+		Query:     "What is my budget for Hawaii?",
+		UserID:    "user1",
 		Threshold: 0.6,
 	})
 	require.NoError(t, err)
@@ -334,4 +328,3 @@ func TestInMemoryStore_Retrieve_ThresholdWithMultipleUsers(t *testing.T) {
 			"User2's memory should not appear in user1's results")
 	}
 }
-

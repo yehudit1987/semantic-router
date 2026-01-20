@@ -92,6 +92,8 @@ func (p *Profile) GetTestCases() []string {
 		"response-api-get",
 		"response-api-delete",
 		"response-api-input-items",
+		// Memory user isolation test
+		"memory-user-isolation",
 	}
 }
 

@@ -193,6 +193,7 @@ class PluginType(str, Enum):
     HEADER_MUTATION = "header_mutation"
     HALLUCINATION = "hallucination"
     ROUTER_REPLAY = "router_replay"
+    MEMORY = "memory"
 
 
 class SemanticCachePluginConfig(BaseModel):
@@ -282,6 +283,27 @@ class RouterReplayPluginConfig(BaseModel):
         default=4096,
         gt=0,
         description="Max bytes to capture per body (must be > 0, default: 4096)",
+    )
+
+
+class MemoryPluginConfig(BaseModel):
+    """Configuration for memory plugin (per-decision memory settings)."""
+
+    enabled: bool = True
+    retrieval_limit: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Max memories to retrieve (default: use global config)",
+    )
+    similarity_threshold: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Min similarity score (0.0-1.0, default: use global config)",
+    )
+    auto_store: Optional[bool] = Field(
+        default=None,
+        description="Auto-extract memories from conversation (default: use request config)",
     )
 
 

@@ -146,13 +146,6 @@ type ConversationMessage struct {
 }
 
 // getTimeout returns the timeout duration from config
-func getTimeout(cfg *config.QueryRewriteConfig) time.Duration {
-	if cfg.TimeoutSeconds > 0 {
-		return time.Duration(cfg.TimeoutSeconds) * time.Second
-	}
-	return 5 * time.Second // default
-}
-
 // getMaxTokens returns max tokens with default
 func getMaxTokens(cfg *config.QueryRewriteConfig) int {
 	if cfg.MaxTokens > 0 {
@@ -169,11 +162,19 @@ func getTemperature(cfg *config.QueryRewriteConfig) float64 {
 	return 0.1 // default
 }
 
+// getTimeout returns timeout from resolved config (from external_models), or default 5s
+func getTimeout(resolved *ResolvedLLMConfig) time.Duration {
+	if resolved != nil && resolved.TimeoutSeconds > 0 {
+		return time.Duration(resolved.TimeoutSeconds) * time.Second
+	}
+	return 5 * time.Second
+}
+
 // queryRewriteSystemPrompt is the system prompt for query rewriting
 const queryRewriteSystemPrompt = `You are a query rewriter for semantic search in a memory database.
 
-Given conversation history and a user query, rewrite the query to be self-contained 
-for searching memories. Include relevant context from history if the query references 
+Given conversation history and a user query, rewrite the query to be self-contained
+for searching memories. Include relevant context from history if the query references
 previous conversation.
 
 CRITICAL RULES:
@@ -221,9 +222,16 @@ Rewritten: What is my project budget?`
 //	History: ["Planning vacation to Hawaii"]
 //	Query: "How much?"
 //	Result: "What is the budget for the Hawaii vacation?"
-func BuildSearchQuery(ctx context.Context, history []ConversationMessage, query string, cfg *config.QueryRewriteConfig) (string, error) {
-	if cfg == nil || !cfg.Enabled || cfg.Endpoint == "" {
+func BuildSearchQuery(ctx context.Context, history []ConversationMessage, query string, routerCfg *config.RouterConfig, cfg *config.QueryRewriteConfig) (string, error) {
+	if cfg == nil || !cfg.Enabled {
 		logging.Debugf("Memory: Query rewriting disabled, using original query")
+		return query, nil
+	}
+
+	// Resolve LLM configuration from external_models or inline config
+	resolved := ResolveQueryRewriteConfig(routerCfg, cfg)
+	if resolved == nil || resolved.Endpoint == "" {
+		logging.Debugf("Memory: Query rewriting endpoint not configured, using original query")
 		return query, nil
 	}
 
@@ -246,7 +254,7 @@ func BuildSearchQuery(ctx context.Context, history []ConversationMessage, query 
 	logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 
 	// Call LLM for rewriting
-	rewrittenQuery, err := callLLMForQueryRewrite(ctx, cfg, userPrompt)
+	rewrittenQuery, err := callLLMForQueryRewrite(ctx, cfg, resolved, userPrompt)
 	if err != nil {
 		logging.Errorf("Memory: Query rewriting failed, using original: %v", err)
 		// Fallback to original query on error
@@ -320,11 +328,72 @@ type llmChatResponse struct {
 	} `json:"choices"`
 }
 
+// ResolvedLLMConfig holds resolved LLM endpoint configuration from external_models.
+type ResolvedLLMConfig struct {
+	Endpoint       string
+	Model          string
+	TimeoutSeconds int
+}
+
+// ResolveQueryRewriteConfig resolves the LLM endpoint configuration for query rewriting.
+// Looks up the external model by ModelRole (defaults to "memory_rewrite").
+func ResolveQueryRewriteConfig(routerCfg *config.RouterConfig, cfg *config.QueryRewriteConfig) *ResolvedLLMConfig {
+	if cfg == nil || routerCfg == nil {
+		return nil
+	}
+
+	// Use configured role or default to memory_rewrite
+	role := cfg.ModelRole
+	if role == "" {
+		role = config.ModelRoleMemoryRewrite
+	}
+
+	externalCfg := routerCfg.FindExternalModelByRole(role)
+	if externalCfg == nil || externalCfg.ModelEndpoint.Address == "" {
+		logging.Warnf("Memory: External model with role '%s' not found in external_models", role)
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("http://%s:%d", externalCfg.ModelEndpoint.Address, externalCfg.ModelEndpoint.Port)
+	return &ResolvedLLMConfig{
+		Endpoint:       endpoint,
+		Model:          externalCfg.ModelName,
+		TimeoutSeconds: externalCfg.TimeoutSeconds,
+	}
+}
+
+// ResolveExtractionConfig resolves the LLM endpoint configuration for memory extraction.
+// Looks up the external model by ModelRole (defaults to "memory_extraction").
+func ResolveExtractionConfig(routerCfg *config.RouterConfig, cfg *config.ExtractionConfig) *ResolvedLLMConfig {
+	if cfg == nil || routerCfg == nil {
+		return nil
+	}
+
+	// Use configured role or default to memory_extraction
+	role := cfg.ModelRole
+	if role == "" {
+		role = config.ModelRoleMemoryExtraction
+	}
+
+	externalCfg := routerCfg.FindExternalModelByRole(role)
+	if externalCfg == nil || externalCfg.ModelEndpoint.Address == "" {
+		logging.Warnf("Memory: External model with role '%s' not found in external_models", role)
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("http://%s:%d", externalCfg.ModelEndpoint.Address, externalCfg.ModelEndpoint.Port)
+	return &ResolvedLLMConfig{
+		Endpoint:       endpoint,
+		Model:          externalCfg.ModelName,
+		TimeoutSeconds: externalCfg.TimeoutSeconds,
+	}
+}
+
 // callLLMForQueryRewrite calls the LLM endpoint for query rewriting
-func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig, userPrompt string) (string, error) {
+func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig, resolved *ResolvedLLMConfig, userPrompt string) (string, error) {
 	// Build request
 	reqBody := llmChatRequest{
-		Model: cfg.Model,
+		Model: resolved.Model,
 		Messages: []llmChatMessage{
 			{Role: "system", Content: queryRewriteSystemPrompt},
 			{Role: "user", Content: userPrompt},
@@ -340,7 +409,7 @@ func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig,
 	}
 
 	// Create HTTP request - endpoint should be OpenAI-compatible base URL
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(cfg.Endpoint, "/"))
+	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(resolved.Endpoint, "/"))
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -348,8 +417,9 @@ func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig,
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Send request
-	client := &http.Client{Timeout: getTimeout(cfg)}
+	// Send request with timeout from external_models config
+	timeout := getTimeout(resolved)
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("LLM request failed: %w", err)

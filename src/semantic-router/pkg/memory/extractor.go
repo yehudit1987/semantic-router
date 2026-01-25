@@ -24,21 +24,21 @@ import (
 // It analyzes conversation messages and identifies important information
 // to store in long-term memory (facts, preferences, procedural knowledge).
 //
+// The LLM endpoint is configured via external_models with model_role="memory_extraction".
+//
 // It supports two modes:
 //  1. Extraction only: Use ExtractFacts() to extract facts without storing them
 //  2. Extraction + Storage with deduplication: Use ProcessResponse() to extract and store with deduplication
 //
 // Usage:
 //
-//	// Extraction only:
-//	extractor := NewMemoryExtractor(cfg)
-//	facts, err := extractor.ExtractFacts(ctx, messages)
-//
 //	// Extraction + Storage with deduplication:
-//	extractorWithStore := NewMemoryExtractorWithStore(cfg, store)
+//	extractorWithStore := NewMemoryExtractorWithStore(routerCfg, &memoryCfg.Extraction, store)
 //	err := extractorWithStore.ProcessResponse(ctx, sessionID, userID, history)
 type MemoryExtractor struct {
 	config      *config.ExtractionConfig
+	endpoint    string       // Resolved LLM endpoint
+	model       string       // Resolved model name
 	client      *http.Client // Reused for connection pooling
 	store       Store        // Optional: for ProcessResponse with deduplication
 	turnCounts  map[string]int
@@ -46,35 +46,50 @@ type MemoryExtractor struct {
 	dedupConfig DeduplicationConfig
 }
 
-// NewMemoryExtractor creates a new MemoryExtractor with the given configuration.
-// The http.Client is reused across requests for connection pooling.
-func NewMemoryExtractor(cfg *config.ExtractionConfig) *MemoryExtractor {
-	timeout := 30 * time.Second
-	if cfg.TimeoutSeconds > 0 {
-		timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
-	}
-	return &MemoryExtractor{
-		config:      cfg,
-		client:      &http.Client{Timeout: timeout},
-		turnCounts:  make(map[string]int),
-		dedupConfig: DefaultDeduplicationConfig(),
-	}
-}
-
-// NewMemoryExtractorWithStore creates a new MemoryExtractor with both config and store.
+// NewMemoryExtractorWithStore creates a new MemoryExtractor with config, router config for external model resolution, and store.
 // This enables ProcessResponse which handles extraction + storage with deduplication.
-func NewMemoryExtractorWithStore(cfg *config.ExtractionConfig, store Store) *MemoryExtractor {
-	timeout := 30 * time.Second
-	if cfg.TimeoutSeconds > 0 {
-		timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
-	}
+// The LLM endpoint is resolved from external_models using the configured model_role (default: "memory_extraction").
+func NewMemoryExtractorWithStore(routerCfg *config.RouterConfig, cfg *config.ExtractionConfig, store Store) *MemoryExtractor {
+	// Resolve LLM endpoint from external_models
+	endpoint, model, timeout := resolveExtractionEndpoint(routerCfg, cfg)
+
 	return &MemoryExtractor{
 		config:      cfg,
+		endpoint:    endpoint,
+		model:       model,
 		client:      &http.Client{Timeout: timeout},
 		store:       store,
 		turnCounts:  make(map[string]int),
 		dedupConfig: DefaultDeduplicationConfig(),
 	}
+}
+
+// resolveExtractionEndpoint resolves the LLM endpoint from external_models.
+func resolveExtractionEndpoint(routerCfg *config.RouterConfig, cfg *config.ExtractionConfig) (endpoint, model string, timeout time.Duration) {
+	timeout = 30 * time.Second // default
+
+	if routerCfg == nil || cfg == nil {
+		return "", "", timeout
+	}
+
+	// Use configured role or default to memory_extraction
+	role := cfg.ModelRole
+	if role == "" {
+		role = config.ModelRoleMemoryExtraction
+	}
+
+	externalCfg := routerCfg.FindExternalModelByRole(role)
+	if externalCfg == nil || externalCfg.ModelEndpoint.Address == "" {
+		logging.Warnf("Memory: External model with role '%s' not found in external_models", role)
+		return "", "", timeout
+	}
+
+	endpoint = fmt.Sprintf("http://%s:%d", externalCfg.ModelEndpoint.Address, externalCfg.ModelEndpoint.Port)
+	model = externalCfg.ModelName
+	if externalCfg.TimeoutSeconds > 0 {
+		timeout = time.Duration(externalCfg.TimeoutSeconds) * time.Second
+	}
+	return endpoint, model, timeout
 }
 
 // SetDeduplicationConfig sets the deduplication configuration.
@@ -148,7 +163,7 @@ Return JSON array. Empty array [] if nothing worth remembering about the USER.`
 //	facts, err := extractor.ExtractFacts(ctx, messages)
 //	// facts = [{Type: "semantic", Content: "User's budget for Hawaii vacation is $10,000"}]
 func (e *MemoryExtractor) ExtractFacts(ctx context.Context, messages []Message) ([]ExtractedFact, error) {
-	if e.config == nil || !e.config.Enabled || e.config.Endpoint == "" {
+	if e.config == nil || !e.config.Enabled || e.endpoint == "" {
 		logging.Debugf("Memory: Fact extraction disabled or not configured")
 		return nil, nil
 	}
@@ -195,7 +210,7 @@ func (e *MemoryExtractor) ExtractFacts(ctx context.Context, messages []Message) 
 func (e *MemoryExtractor) callLLMForExtraction(ctx context.Context, userPrompt string) ([]ExtractedFact, error) {
 	// Build request
 	reqBody := llmChatRequest{
-		Model: e.config.Model,
+		Model: e.model,
 		Messages: []llmChatMessage{
 			{Role: "system", Content: extractionSystemPrompt},
 			{Role: "user", Content: userPrompt},
@@ -210,13 +225,9 @@ func (e *MemoryExtractor) callLLMForExtraction(ctx context.Context, userPrompt s
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Create HTTP request with timeout
-	timeout := getTimeoutForExtraction(e.config)
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(e.config.Endpoint, "/"))
-	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", url, bytes.NewReader(jsonData))
+	// Create HTTP request (timeout is set on http.Client during construction)
+	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(e.endpoint, "/"))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -276,7 +287,7 @@ func (e *MemoryExtractor) ProcessResponse(
 		return nil // Store not enabled, skip extraction
 	}
 
-	if e.config == nil || !e.config.Enabled || e.config.Endpoint == "" {
+	if e.config == nil || !e.config.Enabled || e.endpoint == "" {
 		logging.Infof("Memory extraction: SKIPPED - extraction not configured (config=%v, enabled=%v)",
 			e.config != nil, e.config != nil && e.config.Enabled)
 		return nil // Extraction not enabled
@@ -510,14 +521,6 @@ func truncateForLog(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// getTimeoutForExtraction returns timeout with default (30s for extraction)
-func getTimeoutForExtraction(cfg *config.ExtractionConfig) time.Duration {
-	if cfg.TimeoutSeconds > 0 {
-		return time.Duration(cfg.TimeoutSeconds) * time.Second
-	}
-	return 30 * time.Second // default for extraction (longer than query rewrite)
 }
 
 // getMaxTokensForExtraction returns max tokens with default

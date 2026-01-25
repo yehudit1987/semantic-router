@@ -55,11 +55,11 @@ func NewMilvusStore(options MilvusStoreOptions) (*MilvusStore, error) {
 	}
 
 	if options.Client == nil {
-		return nil, fmt.Errorf("Milvus client is required")
+		return nil, fmt.Errorf("milvus client is required")
 	}
 
 	if options.CollectionName == "" {
-		return nil, fmt.Errorf("Collection name is required")
+		return nil, fmt.Errorf("collection name is required")
 	}
 
 	// Use default config if not provided
@@ -100,8 +100,8 @@ func (m *MilvusStore) ensureCollection(ctx context.Context) error {
 	if hasCollection {
 		logging.Debugf("MilvusStore: collection '%s' already exists", m.collectionName)
 		// Load collection to make it queryable
-		if err := m.client.LoadCollection(ctx, m.collectionName, false); err != nil {
-			logging.Warnf("MilvusStore: failed to load collection: %v (may already be loaded)", err)
+		if loadErr := m.client.LoadCollection(ctx, m.collectionName, false); loadErr != nil {
+			logging.Warnf("MilvusStore: failed to load collection: %v (may already be loaded)", loadErr)
 		}
 		return nil
 	}
@@ -177,8 +177,8 @@ func (m *MilvusStore) ensureCollection(ctx context.Context) error {
 	}
 
 	// Create collection
-	if err := m.client.CreateCollection(ctx, schema, 1); err != nil {
-		return fmt.Errorf("failed to create collection: %w", err)
+	if createErr := m.client.CreateCollection(ctx, schema, 1); createErr != nil {
+		return fmt.Errorf("failed to create collection: %w", createErr)
 	}
 
 	// Create HNSW index for vector search
@@ -217,11 +217,11 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 	}
 
 	if opts.Query == "" {
-		return nil, fmt.Errorf("Query is required")
+		return nil, fmt.Errorf("query is required")
 	}
 
 	if opts.UserID == "" {
-		return nil, fmt.Errorf("User id is required")
+		return nil, fmt.Errorf("user id is required")
 	}
 
 	// TODO: Remove demo logging after POC
@@ -241,7 +241,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 	// For all-MiniLM-L6-v2, we need to ensure it's initialized
 	embedding, err := candle_binding.GetEmbedding(opts.Query, 512)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to generate embedding: %w", err)
+		return nil, fmt.Errorf("failed to generate embedding: %w", err)
 	}
 
 	// Validate embedding dimension matches expected
@@ -280,7 +280,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 	// Using HNSW index with ef parameter (adjust based on your index configuration)
 	searchParam, err := entity.NewIndexHNSWSearchParam(64)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create search parameters: %w", err)
+		return nil, fmt.Errorf("failed to create search parameters: %w", err)
 	}
 
 	// Perform vector search in Milvus with retry logic
@@ -308,7 +308,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 		return retryErr
 	})
 	if err != nil {
-		return nil, fmt.Errorf("Milvus search failed after retries: %w", err)
+		return nil, fmt.Errorf("milvus search failed after retries: %w", err)
 	}
 
 	if len(searchResult) == 0 || searchResult[0].ResultCount == 0 {
@@ -352,7 +352,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 
 		// Extract fields to build MemoryHit
 		var id, content, memType string
-		var metadata map[string]interface{} = make(map[string]interface{})
+		metadata := make(map[string]interface{})
 
 		// Extract ID
 		if idIdx >= 0 && idIdx < len(fields) {
@@ -1020,7 +1020,14 @@ func (m *MilvusStore) retryWithBackoff(ctx context.Context, operation func() err
 		}
 
 		// Calculate exponential backoff delay
-		delay := m.retryBaseDelay * time.Duration(1<<uint(attempt)) // 2^attempt * baseDelay
+		// Cap the exponent to avoid overflow (max 30 for safety)
+		exponent := attempt
+		if exponent < 0 {
+			exponent = 0
+		} else if exponent > 30 {
+			exponent = 30
+		}
+		delay := m.retryBaseDelay * time.Duration(1<<exponent) // 2^attempt * baseDelay
 
 		logging.Debugf("MilvusStore: transient error on attempt %d/%d, retrying in %v: %v",
 			attempt+1, m.maxRetries, delay, lastErr)

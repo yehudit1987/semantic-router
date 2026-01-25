@@ -21,10 +21,12 @@ const (
 
 // Model role constants for external models
 const (
-	ModelRoleGuardrail      = "guardrail"
-	ModelRoleClassification = "classification"
-	ModelRoleScoring        = "scoring"
-	ModelRolePreference     = "preference" // For route preference matching via external LLM
+	ModelRoleGuardrail        = "guardrail"
+	ModelRoleClassification   = "classification"
+	ModelRoleScoring          = "scoring"
+	ModelRolePreference       = "preference"        // For route preference matching via external LLM
+	ModelRoleMemoryRewrite    = "memory_rewrite"    // For memory query rewriting
+	ModelRoleMemoryExtraction = "memory_extraction" // For memory fact extraction
 )
 
 // Signal type constants for rule conditions
@@ -700,47 +702,39 @@ type MemoryEmbeddingConfig struct {
 	Dimension int `yaml:"dimension,omitempty"`
 }
 
-// QueryRewriteConfig holds configuration for LLM-based query rewriting
+// QueryRewriteConfig holds configuration for LLM-based query rewriting.
+// The LLM endpoint is configured via external_models with model_role="memory_rewrite".
 type QueryRewriteConfig struct {
 	// Enable query rewriting
 	Enabled bool `yaml:"enabled"`
 
-	// LLM endpoint for query rewriting (e.g., "http://localhost:8080")
-	Endpoint string `yaml:"endpoint"`
-
-	// Model to use for query rewriting (e.g., "qwen3-7b")
-	Model string `yaml:"model"`
+	// ModelRole references an external model by role (default: "memory_rewrite")
+	// The external model must be defined in external_models with this role
+	ModelRole string `yaml:"model_role,omitempty"`
 
 	// Maximum tokens for rewritten query (default: 50)
 	MaxTokens int `yaml:"max_tokens,omitempty"`
 
 	// Temperature for LLM generation (default: 0.1)
 	Temperature float64 `yaml:"temperature,omitempty"`
-
-	// Timeout in seconds for LLM request (default: 5)
-	TimeoutSeconds int `yaml:"timeout_seconds,omitempty"`
 }
 
 // ExtractionConfig holds configuration for LLM-based fact extraction from conversations.
 // Facts are extracted from conversation history and stored in long-term memory.
+// The LLM endpoint is configured via external_models with model_role="memory_extraction".
 type ExtractionConfig struct {
 	// Enable fact extraction
 	Enabled bool `yaml:"enabled"`
 
-	// LLM endpoint for fact extraction (e.g., "http://localhost:8080")
-	Endpoint string `yaml:"endpoint"`
-
-	// Model to use for extraction (e.g., "qwen3-7b")
-	Model string `yaml:"model"`
+	// ModelRole references an external model by role (default: "memory_extraction")
+	// The external model must be defined in external_models with this role
+	ModelRole string `yaml:"model_role,omitempty"`
 
 	// Maximum tokens for extracted facts (default: 500)
 	MaxTokens int `yaml:"max_tokens,omitempty"`
 
 	// Temperature for LLM generation (default: 0.1)
 	Temperature float64 `yaml:"temperature,omitempty"`
-
-	// Timeout in seconds for LLM request (default: 30)
-	TimeoutSeconds int `yaml:"timeout_seconds,omitempty"`
 
 	// BatchSize is the number of turns between extraction runs (default: 10)
 	BatchSize int `yaml:"batch_size,omitempty"`
@@ -1515,6 +1509,14 @@ type SemanticCachePluginConfig struct {
 	TTLSeconds          *int     `json:"ttl_seconds,omitempty" yaml:"ttl_seconds,omitempty"` // Per-entry TTL (0 = do not cache, nil = use global default)
 }
 
+// MemoryPluginConfig is per-decision memory config (overrides global MemoryConfig).
+type MemoryPluginConfig struct {
+	Enabled             bool     `json:"enabled" yaml:"enabled"`                                               // If false, memory is skipped even if globally enabled
+	RetrievalLimit      *int     `json:"retrieval_limit,omitempty" yaml:"retrieval_limit,omitempty"`           // Max memories to retrieve (nil = use global)
+	SimilarityThreshold *float32 `json:"similarity_threshold,omitempty" yaml:"similarity_threshold,omitempty"` // Min similarity score (nil = use global)
+	AutoStore           *bool    `json:"auto_store,omitempty" yaml:"auto_store,omitempty"`                     // Auto-extract memories (nil = use request config)
+}
+
 // JailbreakPluginConfig represents configuration for jailbreak plugin
 type JailbreakPluginConfig struct {
 	Enabled        bool     `json:"enabled" yaml:"enabled"`
@@ -1835,6 +1837,21 @@ func (d *Decision) GetHallucinationConfig() *HallucinationPluginConfig {
 	result := &HallucinationPluginConfig{}
 	if err := unmarshalPluginConfig(config, result); err != nil {
 		logging.Errorf("Failed to unmarshal hallucination config: %v", err)
+		return nil
+	}
+	return result
+}
+
+// GetMemoryConfig returns the memory plugin config, or nil to use global config.
+func (d *Decision) GetMemoryConfig() *MemoryPluginConfig {
+	config := d.GetPluginConfig("memory")
+	if config == nil {
+		return nil
+	}
+
+	result := &MemoryPluginConfig{}
+	if err := unmarshalPluginConfig(config, result); err != nil {
+		logging.Errorf("Failed to unmarshal memory config: %v", err)
 		return nil
 	}
 	return result

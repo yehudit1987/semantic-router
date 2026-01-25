@@ -10,7 +10,6 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
-
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 
 	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
@@ -40,10 +39,10 @@ type OpenAIRouter struct {
 	ReplayRecorder       *routerreplay.Recorder
 	// ModelSelector is the registry of advanced model selection algorithms
 	// Initialized from config.IntelligentRouting.ModelSelection
-	ModelSelector        *selection.Registry
-	ReplayRecorders      map[string]*routerreplay.Recorder
-	MemoryStore          *memory.MilvusStore
-	MemoryExtractor      *memory.MemoryExtractor
+	ModelSelector   *selection.Registry
+	ReplayRecorders map[string]*routerreplay.Recorder
+	MemoryStore     *memory.MilvusStore
+	MemoryExtractor *memory.MemoryExtractor
 }
 
 // Ensure OpenAIRouter implements the ext_proc calls
@@ -338,8 +337,8 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 	var memoryExtractor *memory.MemoryExtractor
 	if cfg.Memory.Enabled && cfg.Memory.Extraction.Enabled {
 		if memoryStore != nil {
-			memoryExtractor = memory.NewMemoryExtractorWithStore(&cfg.Memory.Extraction, memoryStore)
-			logging.Infof("Memory extractor enabled with extraction endpoint: %s", cfg.Memory.Extraction.Endpoint)
+			memoryExtractor = memory.NewMemoryExtractorWithStore(cfg, &cfg.Memory.Extraction, memoryStore)
+			logging.Infof("Memory extractor enabled with model_role: %s", cfg.Memory.Extraction.ModelRole)
 		} else {
 			logging.Warnf("Memory extraction enabled but memory store not available, extraction will be disabled")
 		}
@@ -699,7 +698,7 @@ func createMemoryStore(cfg *config.RouterConfig) (*memory.MilvusStore, error) {
 	}
 	if state == nil || !state.IsHealthy {
 		milvusClient.Close()
-		return nil, fmt.Errorf("Milvus connection is not healthy")
+		return nil, fmt.Errorf("milvus connection is not healthy")
 	}
 
 	// Create memory store

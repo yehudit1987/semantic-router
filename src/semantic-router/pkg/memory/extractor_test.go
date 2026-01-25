@@ -5,12 +5,50 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 )
+
+// =============================================================================
+// Test Helpers
+// =============================================================================
+
+// createMockRouterConfig creates a RouterConfig with external_models pointing to the test server
+func createMockRouterConfig(serverURL string) *config.RouterConfig {
+	if serverURL == "" {
+		return nil
+	}
+
+	// Parse URL to extract host and port (skip "http://")
+	hostPort := strings.TrimPrefix(serverURL, "http://")
+	parts := strings.Split(hostPort, ":")
+	address := parts[0]
+	port := 0
+	if len(parts) > 1 {
+		port, _ = strconv.Atoi(parts[1])
+	}
+
+	return &config.RouterConfig{
+		ExternalModels: []config.ExternalModelConfig{
+			{
+				Provider:  "vllm",
+				ModelRole: config.ModelRoleMemoryExtraction,
+				ModelEndpoint: config.ClassifierVLLMEndpoint{
+					Address: address,
+					Port:    port,
+				},
+				ModelName:      "test-model",
+				TimeoutSeconds: 30,
+			},
+		},
+	}
+}
 
 // =============================================================================
 // ExtractFacts Tests
@@ -18,7 +56,7 @@ import (
 
 func TestExtractFacts_DisabledConfig(t *testing.T) {
 	// Test with nil config
-	extractor := NewMemoryExtractor(nil)
+	extractor := NewMemoryExtractorWithStore(nil, nil, nil)
 	facts, err := extractor.ExtractFacts(context.Background(), []Message{
 		{Role: "user", Content: "My budget is $10,000"},
 	})
@@ -26,27 +64,25 @@ func TestExtractFacts_DisabledConfig(t *testing.T) {
 	assert.Nil(t, facts, "should return nil when config is nil")
 
 	// Test with disabled config
-	extractor = NewMemoryExtractor(&config.ExtractionConfig{Enabled: false})
+	extractor = NewMemoryExtractorWithStore(nil, &config.ExtractionConfig{Enabled: false}, nil)
 	facts, err = extractor.ExtractFacts(context.Background(), []Message{
 		{Role: "user", Content: "My budget is $10,000"},
 	})
 	require.NoError(t, err)
 	assert.Nil(t, facts, "should return nil when disabled")
 
-	// Test with empty endpoint
-	extractor = NewMemoryExtractor(&config.ExtractionConfig{Enabled: true, Endpoint: ""})
+	// Test with no external model configured (no endpoint)
+	extractor = NewMemoryExtractorWithStore(nil, &config.ExtractionConfig{Enabled: true}, nil)
 	facts, err = extractor.ExtractFacts(context.Background(), []Message{
 		{Role: "user", Content: "My budget is $10,000"},
 	})
 	require.NoError(t, err)
-	assert.Nil(t, facts, "should return nil when endpoint is empty")
+	assert.Nil(t, facts, "should return nil when no external model configured")
 }
 
 func TestExtractFacts_EmptyMessages(t *testing.T) {
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: "http://localhost:8080",
-	})
+	routerCfg := createMockRouterConfig("http://localhost:8080")
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	facts, err := extractor.ExtractFacts(context.Background(), nil)
 	require.NoError(t, err)
@@ -63,11 +99,8 @@ func TestExtractFacts_SingleSemanticFact(t *testing.T) {
 	server := createMockLLMServer(t, mockResponse)
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "My budget for the Hawaii trip is $10,000"},
@@ -90,11 +123,8 @@ func TestExtractFacts_MultipleFacts(t *testing.T) {
 	server := createMockLLMServer(t, mockResponse)
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "My budget is $10,000. I prefer direct flights."},
@@ -115,11 +145,8 @@ func TestExtractFacts_EmptyArray(t *testing.T) {
 	server := createMockLLMServer(t, "[]")
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "Hello!"},
@@ -137,11 +164,8 @@ func TestExtractFacts_MarkdownCodeBlock(t *testing.T) {
 	server := createMockLLMServer(t, mockResponse)
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "I love coffee"},
@@ -160,11 +184,8 @@ func TestExtractFacts_LLMError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "My budget is $10,000"},
@@ -181,11 +202,8 @@ func TestExtractFacts_InvalidJSON(t *testing.T) {
 	server := createMockLLMServer(t, "not valid json at all")
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "My budget is $10,000"},
@@ -207,11 +225,8 @@ func TestExtractFacts_InvalidType(t *testing.T) {
 	server := createMockLLMServer(t, mockResponse)
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "Test message"},
@@ -235,11 +250,8 @@ func TestExtractFacts_EmptyContent(t *testing.T) {
 	server := createMockLLMServer(t, mockResponse)
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "Test message"},
@@ -260,11 +272,8 @@ func TestExtractFacts_AllMemoryTypes(t *testing.T) {
 	server := createMockLLMServer(t, mockResponse)
 	defer server.Close()
 
-	extractor := NewMemoryExtractor(&config.ExtractionConfig{
-		Enabled:  true,
-		Endpoint: server.URL,
-		Model:    "test-model",
-	})
+	routerCfg := createMockRouterConfig(server.URL)
+	extractor := NewMemoryExtractorWithStore(routerCfg, &config.ExtractionConfig{Enabled: true}, nil)
 
 	messages := []Message{
 		{Role: "user", Content: "Various conversation"},
@@ -467,10 +476,10 @@ func TestFormatMessagesForExtraction(t *testing.T) {
 
 func TestFormatMessagesForExtraction_Empty(t *testing.T) {
 	result := formatMessagesForExtraction(nil)
-	assert.Equal(t, "", result)
+	assert.Empty(t, result)
 
 	result = formatMessagesForExtraction([]Message{})
-	assert.Equal(t, "", result)
+	assert.Empty(t, result)
 }
 
 // =============================================================================
@@ -500,15 +509,6 @@ func TestTruncateForLog(t *testing.T) {
 // =============================================================================
 // Config Default Tests
 // =============================================================================
-
-func TestGetTimeoutForExtraction(t *testing.T) {
-	// Default timeout (nil config)
-	assert.Equal(t, int64(30000000000), getTimeoutForExtraction(&config.ExtractionConfig{}).Nanoseconds())
-
-	// Custom timeout
-	cfg := &config.ExtractionConfig{TimeoutSeconds: 60}
-	assert.Equal(t, int64(60000000000), getTimeoutForExtraction(cfg).Nanoseconds())
-}
 
 func TestGetMaxTokensForExtraction(t *testing.T) {
 	// Default
@@ -552,6 +552,6 @@ func createMockLLMServer(t *testing.T, factsJSON string) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	}))
 }

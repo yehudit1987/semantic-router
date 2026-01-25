@@ -122,18 +122,22 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 
 	// Execute RAG plugin if enabled (after cache check, before other plugins)
 	// RAG plugin retrieves context and injects it into the request
-	if err := r.executeRAGPlugin(ctx, decisionName); err != nil {
+	if ragErr := r.executeRAGPlugin(ctx, decisionName); ragErr != nil {
 		// If RAG fails with on_failure=block, return error response
-		return r.createErrorResponse(503, fmt.Sprintf("RAG retrieval failed: %v", err)), nil
+		return r.createErrorResponse(503, fmt.Sprintf("RAG retrieval failed: %v", ragErr)), nil
 	}
 
 	// Handle memory retrieval (if enabled)
 	// Memory retrieval happens after cache check to avoid unnecessary work on cache hits
 	// and before model routing to inject memories into LLM context
-	requestBody, err = r.handleMemoryRetrieval(ctx, userContent, requestBody, openAIRequest)
-	if err != nil {
-		logging.Warnf("Memory retrieval failed: %v, continuing without memory", err)
+	requestBody, memErr := r.handleMemoryRetrieval(ctx, userContent, requestBody, openAIRequest)
+	if memErr != nil {
+		logging.Warnf("Memory retrieval failed: %v, continuing without memory", memErr)
 		// Graceful degradation: continue without memory if retrieval fails
+	}
+	// Update the translated body with injected memories for Response API
+	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest && len(requestBody) > 0 {
+		ctx.ResponseAPICtx.TranslatedBody = requestBody
 	}
 
 	// Handle model selection and routing with pre-computed classification results and selected model
@@ -641,27 +645,27 @@ func (r *OpenAIRouter) getModelParams() map[string]config.ModelParams {
 }
 
 // handleMemoryRetrieval retrieves relevant memories and injects them into the request.
-// This function is called after cache check and before model routing.
-//
-// Flow:
-//  1. Check if memory is enabled
-//  2. Use ShouldSearchMemory to decide if query should trigger memory search
-//  3. Extract conversation history from request messages
-//  4. Build search query (with context/rewriting if needed)
-//  5. Search Milvus for relevant memories
-//  6. Inject memories into request body as system message
-//
-// Returns the modified request body (or original if no memories found/injected).
-// Errors are logged but don't block request processing (graceful degradation).
+// Per-decision plugin config takes precedence over global config.
 func (r *OpenAIRouter) handleMemoryRetrieval(
 	ctx *RequestContext,
 	userContent string,
 	requestBody []byte,
 	openAIRequest *openai.ChatCompletionNewParams,
 ) ([]byte, error) {
-	// Check if memory is enabled
-	if !r.Config.Memory.Enabled {
-		logging.Debugf("Memory: Disabled in config, skipping retrieval")
+	var memoryPluginConfig *config.MemoryPluginConfig
+	if ctx.VSRSelectedDecision != nil {
+		memoryPluginConfig = ctx.VSRSelectedDecision.GetMemoryConfig()
+	}
+
+	memoryEnabled := r.Config.Memory.Enabled
+	if memoryPluginConfig != nil {
+		memoryEnabled = memoryPluginConfig.Enabled
+		if !memoryEnabled {
+			logging.Debugf("Memory: Disabled by per-decision plugin config for decision '%s'", ctx.VSRSelectedDecisionName)
+			return requestBody, nil
+		}
+	} else if !memoryEnabled {
+		logging.Debugf("Memory: Disabled in global config, skipping retrieval")
 		return requestBody, nil
 	}
 
@@ -677,6 +681,11 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 	logging.Infof("║                    MEMORY RETRIEVAL FLOW                         ║")
 	logging.Infof("╠══════════════════════════════════════════════════════════════════╣")
 	logging.Infof("║ User Query: %s", truncateForLog(userContent, 50))
+	if memoryPluginConfig != nil {
+		logging.Infof("║ Config Source: per-decision plugin (decision: %s)", ctx.VSRSelectedDecisionName)
+	} else {
+		logging.Infof("║ Config Source: global config")
+	}
 
 	// Step 1: Memory decision - should we search?
 	if !ShouldSearchMemory(ctx, userContent) {
@@ -705,6 +714,7 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 		ctx.TraceContext,
 		history,
 		userContent,
+		r.Config,
 		&r.Config.Memory.QueryRewrite,
 	)
 	if err != nil {
@@ -721,12 +731,24 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 	}
 	logging.Infof("║ User ID: %s", userID)
 
-	// Step 5: Search Milvus for relevant memories
+	// Step 5: Search Milvus (per-decision settings override global defaults)
+	retrieveLimit := r.Config.Memory.DefaultRetrievalLimit
+	retrieveThreshold := r.Config.Memory.DefaultSimilarityThreshold
+
+	if memoryPluginConfig != nil {
+		if memoryPluginConfig.RetrievalLimit != nil {
+			retrieveLimit = *memoryPluginConfig.RetrievalLimit
+		}
+		if memoryPluginConfig.SimilarityThreshold != nil {
+			retrieveThreshold = *memoryPluginConfig.SimilarityThreshold
+		}
+	}
+
 	retrieveOpts := memory.RetrieveOptions{
 		Query:     searchQuery,
 		UserID:    userID,
-		Limit:     r.Config.Memory.DefaultRetrievalLimit,
-		Threshold: r.Config.Memory.DefaultSimilarityThreshold,
+		Limit:     retrieveLimit,
+		Threshold: retrieveThreshold,
 	}
 
 	// Apply defaults if not configured

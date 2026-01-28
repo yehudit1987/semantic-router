@@ -223,6 +223,7 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 		// Capture current turn for extraction (must be done before goroutine)
 		currentUserMessage := extractCurrentUserMessage(ctx)
 		currentAssistantResponse := extractAssistantResponseText(responseBody)
+
 		go func() {
 			// Use a background context for the goroutine to ensure it runs to completion
 			// even if the original request context is cancelled.
@@ -233,8 +234,6 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 				logging.Errorf("Memory extraction failed: %v", err)
 				return
 			}
-
-			logging.Infof("Memory extraction: sessionID=%s, userID=%s, historyLen=%d", sessionID, userID, len(history))
 
 			// Append current turn to history (not yet in ConversationHistory)
 			// This ensures the current user message + assistant response are extracted
@@ -247,7 +246,7 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 
 			logging.Infof("Memory extraction: sessionID=%s, userID=%s, historyLen=%d (including current turn)", sessionID, userID, len(history))
 
-			// Only extract if we have history (not relevant for first request)
+			// Only extract if we have history
 			if len(history) == 0 {
 				logging.Infof("Memory extraction: skipping - no history to extract")
 				return // No history to extract from

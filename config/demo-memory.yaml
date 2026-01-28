@@ -1,0 +1,107 @@
+# Demo Configuration for Agentic Memory
+#
+# Prerequisites:
+#   1. vLLM endpoint running - replace <VLLM_HOST> and <VLLM_PORT> below
+#   2. Milvus running:
+#      docker run -d --name milvus -p 19530:19530 -p 9091:9091 milvusdb/milvus:latest standalone
+#   3. Router: make run-router CONFIG_FILE=config/demo-memory.yaml
+#   4. Chainlit: cd scripts && pip install chainlit requests && chainlit run chainlit_demo.py -w --port 8000
+
+# BERT Model for Memory Embeddings (required for memory retrieval)
+bert_model:
+  model_id: sentence-transformers/all-MiniLM-L6-v2
+  threshold: 0.8
+  use_cpu: true
+
+# Response API (required for conversation chaining)
+response_api:
+  enabled: true
+  store_backend: "memory"
+  ttl_seconds: 86400
+  max_responses: 1000
+
+# Semantic Cache (optional for demo, can disable)
+semantic_cache:
+  enabled: false
+
+# External Models for Memory LLM Operations
+external_models:
+  - llm_provider: "vllm"
+    model_role: "memory_extraction"
+    llm_endpoint:
+      address: "<VLLM_HOST>"
+      port: <VLLM_PORT>
+      name: "demo-gpu"
+    llm_model_name: "Qwen/Qwen2.5-7B-Instruct"
+    llm_timeout_seconds: 60
+  - llm_provider: "vllm"
+    model_role: "memory_rewrite"
+    llm_endpoint:
+      address: "<VLLM_HOST>"
+      port: <VLLM_PORT>
+      name: "demo-gpu"
+    llm_model_name: "Qwen/Qwen2.5-7B-Instruct"
+    llm_timeout_seconds: 30
+
+# Agentic Memory Configuration
+memory:
+  enabled: true
+  milvus:
+    address: "127.0.0.1:19530"
+    collection: "demo_memory"
+    dimension: 384
+  embedding:
+    model: "all-MiniLM-L6-v2"
+    dimension: 384
+  default_retrieval_limit: 5
+  default_similarity_threshold: 0.70
+  query_rewrite:
+    enabled: true
+    model_role: "memory_rewrite"
+    max_tokens: 100
+  extraction:
+    enabled: true
+    model_role: "memory_extraction"
+    batch_size: 1  # Extract every turn for demo (immediate feedback)
+    max_tokens: 500
+
+# vLLM Endpoints
+vllm_endpoints:
+  - name: "demo-gpu"
+    address: "<VLLM_HOST>"
+    port: <VLLM_PORT>
+    weight: 1
+
+# Model Configuration
+model_config:
+  "Qwen/Qwen2.5-7B-Instruct":
+    reasoning_family: "qwen3"
+    preferred_endpoints: ["demo-gpu"]
+
+# Simple category for demo
+categories:
+  - category_metadata:
+      name: "general"
+      description: "General queries"
+
+# Single decision with memory plugin
+decisions:
+  - name: "demo_with_memory"
+    description: "Demo route with memory enabled"
+    priority: 1
+    rules:
+      operator: "OR"
+      conditions:
+        - type: "default"
+    modelRefs:
+      - model: "Qwen/Qwen2.5-7B-Instruct"
+        use_reasoning: false
+    plugins:
+      - type: "memory"
+        configuration:
+          enabled: true
+          retrieval_limit: 5
+          similarity_threshold: 0.70
+          auto_store: true
+
+default_model: "Qwen/Qwen2.5-7B-Instruct"

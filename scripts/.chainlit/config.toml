@@ -1,0 +1,56 @@
+[project]
+# Enable telemetry
+enable_telemetry = false
+
+# Session timeout in seconds
+session_timeout = 3600
+
+# Enable user info
+enable_user_info = true
+
+[features]
+# Show the prompt playground
+prompt_playground = false
+
+# Enable speech to text
+speech_to_text = false
+
+# Enable multi-modal uploads
+multi_modal = false
+
+# Enable latex rendering
+latex = false
+
+# Streaming
+streaming = true
+
+# Collapse conversation threads
+collapse_threads = false
+
+# Suggested replies
+suggested_replies = true
+
+[UI]
+# Name of the app (displayed in header)
+name = "Semantic Router"
+
+# Description
+description = "Agentic Memory Demo"
+
+# Hide chain of thought
+hide_cot = false
+
+# Default theme
+default_theme = "dark"
+
+# Show readme as default
+show_readme_as_default = false
+
+# Custom CSS for branding
+custom_css = "/public/styles.css"
+
+# GitHub link
+github = "https://github.com/vllm-project/semantic-router"
+
+[meta]
+generated_by = "vllm-semantic-router"

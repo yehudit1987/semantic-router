@@ -1,0 +1,119 @@
+/* Semantic Router Memory Demo - Custom Styles */
+
+/* Hide Chainlit logo completely */
+header img,
+header svg,
+header a > svg,
+header a > img,
+header [class*="logo"],
+header [class*="Logo"],
+.MuiToolbar-root img,
+.MuiToolbar-root svg:not(.MuiSvgIcon-root),
+.MuiToolbar-root > a:first-child,
+a[href*="chainlit"],
+a[href="/"],
+img[alt*="logo"],
+img[alt*="Logo"],
+img[src*="logo"],
+[data-testid*="logo"],
+.watermark,
+header > div > a:first-child {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+}
+
+/* Header gradient styling */
+header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    border-bottom: none !important;
+}
+
+/* App title styling */
+header .MuiTypography-root {
+    color: white !important;
+    font-weight: 600 !important;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+/* First message (header banner) styling */
+.message:first-child .markdown-body {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    padding: 20px 28px !important;
+    border-radius: 16px !important;
+    color: white !important;
+    text-align: center !important;
+    margin-bottom: 16px !important;
+}
+
+.message:first-child .markdown-body h2 {
+    color: white !important;
+    font-size: 22px !important;
+    margin-bottom: 6px !important;
+    font-weight: 600 !important;
+}
+
+.message:first-child .markdown-body em {
+    color: rgba(255,255,255,0.85) !important;
+    font-size: 14px !important;
+}
+
+/* Login page styling */
+.MuiPaper-root.MuiCard-root {
+    background: #1e1e2e !important;
+    border: 1px solid #3d3d5c !important;
+    border-radius: 16px !important;
+}
+
+/* Primary button gradient */
+.MuiButton-containedPrimary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    border-radius: 12px !important;
+    font-weight: 600 !important;
+    text-transform: none !important;
+    padding: 12px 24px !important;
+}
+
+.MuiButton-containedPrimary:hover {
+    background: linear-gradient(135deg, #764ba2 0%, #667eea 100%) !important;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4) !important;
+}
+
+/* Step indicators styling */
+.step-container {
+    border-left: 3px solid #667eea !important;
+    background: rgba(102, 126, 234, 0.05) !important;
+    border-radius: 8px !important;
+    margin: 8px 0 !important;
+}
+
+/* Input field styling */
+.MuiOutlinedInput-root {
+    border-radius: 12px !important;
+    background: #2a2a3e !important;
+}
+
+/* Sidebar styling */
+.MuiDrawer-paper {
+    background: #1a1a2e !important;
+}
+
+/* Message styling */
+.markdown-body {
+    font-size: 15px !important;
+    line-height: 1.6 !important;
+}
+
+/* Code blocks */
+.markdown-body pre {
+    background: #2d2d44 !important;
+    border-radius: 8px !important;
+}
+
+/* Custom accent colors */
+:root {
+    --primary-color: #667eea;
+    --secondary-color: #764ba2;
+}

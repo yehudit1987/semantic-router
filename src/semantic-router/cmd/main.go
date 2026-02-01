@@ -152,69 +152,83 @@ func main() {
 		logging.Infof("Metrics server disabled")
 	}
 
-	// Initialize embedding models BEFORE creating server, this ensures Qwen3/Gemma/mmBERT models are ready when semantic cache is initialized
+	// Initialize embedding models BEFORE creating server, this ensures Qwen3/Gemma/mmBERT/BERT models are ready when semantic cache is initialized
 	// Use the already loaded config instead of calling config.Load() again
 	var embeddingModelsInitialized bool
-	if cfg.Qwen3ModelPath != "" || cfg.GemmaModelPath != "" || cfg.EmbeddingModels.MmBertModelPath != "" {
-		var initErr error
 
-		// Resolve model paths using registry (supports aliases like "qwen3", "gemma", "mmbert")
-		qwen3Path := config.ResolveModelPath(cfg.Qwen3ModelPath)
-		gemmaPath := config.ResolveModelPath(cfg.GemmaModelPath)
-		mmBertPath := config.ResolveModelPath(cfg.EmbeddingModels.MmBertModelPath)
+	// Resolve model paths using registry (supports aliases like "qwen3", "gemma", "mmbert", "bert")
+	qwen3Path := config.ResolveModelPath(cfg.Qwen3ModelPath)
+	gemmaPath := config.ResolveModelPath(cfg.GemmaModelPath)
+	mmBertPath := config.ResolveModelPath(cfg.EmbeddingModels.MmBertModelPath)
+	bertPath := config.ResolveModelPath(cfg.EmbeddingModels.BertModelPath)
 
-		logging.Infof("Initializing embedding models: qwen3=%q, gemma=%q, mmbert=%q, useCPU=%t",
-			qwen3Path, gemmaPath, mmBertPath, cfg.EmbeddingModels.UseCPU)
+	// Check if any unified models (qwen3/gemma/mmbert) are configured
+	hasUnifiedModels := qwen3Path != "" || gemmaPath != "" || mmBertPath != ""
+	hasBertModel := bertPath != ""
 
-		// Check if semantic cache uses qwen3 and needs batched initialization
-		// The cache uses GetEmbeddingBatched() which requires InitEmbeddingModelsBatched()
-		useBatchedInit := cfg.SemanticCache.Enabled &&
-			strings.ToLower(strings.TrimSpace(cfg.SemanticCache.EmbeddingModel)) == "qwen3" &&
-			qwen3Path != ""
+	if hasUnifiedModels || hasBertModel {
+		logging.Infof("Initializing embedding models: qwen3=%q, gemma=%q, mmbert=%q, bert=%q, useCPU=%t",
+			qwen3Path, gemmaPath, mmBertPath, bertPath, cfg.EmbeddingModels.UseCPU)
 
-		// If semantic cache uses qwen3, use batched initialization for better performance
-		if useBatchedInit {
-			logging.Infof("Semantic cache uses qwen3, initializing with batched embedding model...")
-			maxBatchSize := 64      // Batch up to 64 requests together
-			maxWaitMs := uint64(10) // Wait max 10ms for batch to fill
-			initErr = candle_binding.InitEmbeddingModelsBatched(
-				qwen3Path,
-				maxBatchSize,
-				maxWaitMs,
-				cfg.EmbeddingModels.UseCPU,
-			)
-			if initErr == nil {
-				logging.Infof("Batched embedding model initialized successfully (qwen3 for semantic cache)")
-			}
+		// Initialize unified models (qwen3/gemma/mmbert) if any are configured
+		if hasUnifiedModels {
+			var initErr error
 
-			// Also initialize standard ModelFactory for classification and other features
-			// Both need to be initialized when cache uses qwen3
-			if initErr == nil {
+			// Check if semantic cache uses qwen3 and needs batched initialization
+			useBatchedInit := cfg.SemanticCache.Enabled &&
+				strings.ToLower(strings.TrimSpace(cfg.SemanticCache.EmbeddingModel)) == "qwen3" &&
+				qwen3Path != ""
+
+			if useBatchedInit {
+				logging.Infof("Semantic cache uses qwen3, initializing with batched embedding model...")
+				maxBatchSize := 64
+				maxWaitMs := uint64(10)
+				initErr = candle_binding.InitEmbeddingModelsBatched(
+					qwen3Path,
+					maxBatchSize,
+					maxWaitMs,
+					cfg.EmbeddingModels.UseCPU,
+				)
+				if initErr == nil {
+					logging.Infof("Batched embedding model initialized successfully (qwen3 for semantic cache)")
+					// Also initialize standard ModelFactory
+					initErr = candle_binding.InitEmbeddingModels(
+						qwen3Path,
+						gemmaPath,
+						mmBertPath,
+						cfg.EmbeddingModels.UseCPU,
+					)
+				}
+			} else {
 				initErr = candle_binding.InitEmbeddingModels(
-					qwen3Path,  // Initialize qwen3 in standard factory too (for classification)
-					gemmaPath,  // Also initialize gemma if configured
-					mmBertPath, // Also initialize mmbert if configured
+					qwen3Path,
+					gemmaPath,
+					mmBertPath,
 					cfg.EmbeddingModels.UseCPU,
 				)
 			}
-		} else {
-			// Use standard initialization for other use cases (qwen3, gemma, and mmbert)
-			initErr = candle_binding.InitEmbeddingModels(
-				qwen3Path,
-				gemmaPath,
-				mmBertPath,
-				cfg.EmbeddingModels.UseCPU,
-			)
+
+			if initErr != nil {
+				logging.Errorf("Failed to initialize unified embedding models: %v", initErr)
+				logging.Warnf("Embedding API endpoints will return placeholder embeddings")
+				logging.Warnf("Tools database will NOT be loaded (requires embedding models)")
+			} else {
+				logging.Infof("Unified embedding models initialized successfully")
+				embeddingModelsInitialized = true
+			}
 		}
 
-		if initErr != nil {
-			logging.Errorf("Failed to initialize embedding models: %v", initErr)
-			logging.Warnf("Embedding API endpoints will return placeholder embeddings")
-			logging.Warnf("Tools database will NOT be loaded (requires embedding models)")
-			embeddingModelsInitialized = false
-		} else {
-			logging.Infof("Embedding models initialized successfully")
-			embeddingModelsInitialized = true
+		// Initialize BERT model separately (for memory with 384-dim embeddings)
+		// This uses a different initialization path (InitModel vs InitEmbeddingModels)
+		if hasBertModel {
+			logging.Infof("Initializing BERT model for memory: %s", bertPath)
+			if bertErr := candle_binding.InitModel(bertPath, cfg.EmbeddingModels.UseCPU); bertErr != nil {
+				logging.Warnf("Failed to initialize BERT model: %v", bertErr)
+				logging.Warnf("Memory retrieval with 'bert' embedding type will not work")
+			} else {
+				logging.Infof("BERT model initialized successfully (384-dim for memory)")
+				embeddingModelsInitialized = true
+			}
 		}
 	} else {
 		logging.Infof("No embedding models configured, skipping initialization")
@@ -223,6 +237,7 @@ func main() {
 		logging.Infof("    qwen3_model_path: 'models/mom-embedding-pro'")
 		logging.Infof("    gemma_model_path: 'models/mom-embedding-flash'")
 		logging.Infof("    mmbert_model_path: 'models/mom-embedding-ultra'")
+		logging.Infof("    bert_model_path: 'models/all-MiniLM-L12-v2'  # For memory (384-dim)")
 		logging.Infof("    use_cpu: true")
 		embeddingModelsInitialized = false
 	}

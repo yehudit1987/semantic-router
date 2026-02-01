@@ -447,6 +447,9 @@ type EmbeddingModels struct {
 	// Path to mmBERT 2D Matryoshka embedding model directory
 	// Supports layer early exit (3/6/11/22 layers) and dimension reduction (64-768)
 	MmBertModelPath string `yaml:"mmbert_model_path"`
+	// Path to BERT/MiniLM embedding model directory (e.g., all-MiniLM-L6-v2, all-MiniLM-L12-v2)
+	// Produces 384-dim embeddings, recommended for memory retrieval due to forgiving semantic matching
+	BertModelPath string `yaml:"bert_model_path"`
 	// Use CPU for inference (default: true, auto-detect GPU if available)
 	UseCPU bool `yaml:"use_cpu"`
 

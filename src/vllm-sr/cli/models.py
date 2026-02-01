@@ -463,6 +463,25 @@ class MemoryConfig(BaseModel):
     extraction_batch_size: int = 10  # Extract every N turns
 
 
+class EmbeddingModelsConfig(BaseModel):
+    """Embedding models configuration for memory and semantic features."""
+
+    qwen3_model_path: Optional[str] = Field(
+        None, description="Path to Qwen3-Embedding model"
+    )
+    gemma_model_path: Optional[str] = Field(
+        None, description="Path to EmbeddingGemma model"
+    )
+    mmbert_model_path: Optional[str] = Field(
+        None, description="Path to mmBERT 2D Matryoshka model"
+    )
+    bert_model_path: Optional[str] = Field(
+        None,
+        description="Path to BERT/MiniLM model (recommended for memory retrieval)",
+    )
+    use_cpu: bool = Field(True, description="Use CPU for inference")
+
+
 class UserConfig(BaseModel):
     """Complete user configuration."""
 
@@ -472,6 +491,9 @@ class UserConfig(BaseModel):
     decisions: List[Decision]
     providers: Providers
     memory: Optional[MemoryConfig] = None  # Agentic Memory config
+    embedding_models: Optional[EmbeddingModelsConfig] = (
+        None  # Embedding models for memory
+    )
 
     class Config:
         populate_by_name = True

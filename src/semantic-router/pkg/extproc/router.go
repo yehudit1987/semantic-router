@@ -722,9 +722,13 @@ func createMemoryStore(cfg *config.RouterConfig) (*memory.MilvusStore, error) {
 	}
 
 	// Auto-detect embedding model from embedding_models configuration
+	// Priority: bert (384-dim, best for memory) > mmbert > qwen3 > gemma
 	embeddingModel := cfg.Memory.EmbeddingModel
 	if embeddingModel == "" {
-		if cfg.EmbeddingModels.MmBertModelPath != "" {
+		if cfg.EmbeddingModels.BertModelPath != "" {
+			embeddingModel = "bert"
+			logging.Infof("Memory: Auto-selected bert from embedding_models config (384-dim, recommended for memory)")
+		} else if cfg.EmbeddingModels.MmBertModelPath != "" {
 			embeddingModel = "mmbert"
 			logging.Infof("Memory: Auto-selected mmbert from embedding_models config")
 		} else if cfg.EmbeddingModels.Qwen3ModelPath != "" {
@@ -735,12 +739,13 @@ func createMemoryStore(cfg *config.RouterConfig) (*memory.MilvusStore, error) {
 			logging.Infof("Memory: Auto-selected gemma from embedding_models config")
 		} else {
 			embeddingModel = "bert"
-			logging.Warnf("Memory: No embedding models configured, using bert")
+			logging.Warnf("Memory: No embedding models configured, bert will be used but may fail without bert_model_path")
 		}
 	}
 
 	embeddingConfig := memory.EmbeddingConfig{
-		Model: memory.EmbeddingModelType(embeddingModel),
+		Model:     memory.EmbeddingModelType(embeddingModel),
+		Dimension: cfg.Memory.Embedding.Dimension, // Pass dimension from config for Matryoshka models
 	}
 
 	logging.Infof("Memory: Connecting to Milvus at %s, collection=%s", milvusAddress, collectionName)

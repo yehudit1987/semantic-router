@@ -209,3 +209,63 @@ func extractTextFromContentParts(parts []responseapi.ContentPart) string {
 	}
 	return text.String()
 }
+
+// extractCurrentUserMessage extracts the current user message from the request context.
+// This is used to include the current turn in memory extraction.
+func extractCurrentUserMessage(ctx *RequestContext) string {
+	if ctx.ResponseAPICtx == nil || ctx.ResponseAPICtx.OriginalRequest == nil {
+		return ""
+	}
+
+	// Response API: input is json.RawMessage, try to parse as string
+	input := ctx.ResponseAPICtx.OriginalRequest.Input
+	if len(input) == 0 {
+		return ""
+	}
+
+	// Try parsing as a simple string first
+	var inputStr string
+	if err := json.Unmarshal(input, &inputStr); err == nil {
+		return inputStr
+	}
+
+	// Fallback: return raw JSON as string (for complex input types)
+	return string(input)
+}
+
+// extractAssistantResponseText extracts the assistant's response text from the LLM response body.
+// Supports OpenAI Chat Completions format.
+func extractAssistantResponseText(responseBody []byte) string {
+	if len(responseBody) == 0 {
+		return ""
+	}
+
+	// Try to parse as OpenAI Chat Completions response
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(responseBody, &chatResp); err != nil {
+		logging.Debugf("extractAssistantResponseText: failed to parse response: %v", err)
+		return ""
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return ""
+	}
+
+	// Try message.content first, then delta.content (for streaming)
+	content := chatResp.Choices[0].Message.Content
+	if content == "" {
+		content = chatResp.Choices[0].Delta.Content
+	}
+
+	return content
+}

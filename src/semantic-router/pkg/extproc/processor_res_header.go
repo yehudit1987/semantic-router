@@ -1,6 +1,7 @@
 package extproc
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/tracing"
@@ -18,6 +20,28 @@ import (
 
 // handleResponseHeaders processes the response headers
 func (r *OpenAIRouter) handleResponseHeaders(v *ext_proc.ProcessingRequest_ResponseHeaders, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+	// If this is a looper internal request, update router replay status and continue
+	if ctx.LooperRequest {
+		// Extract status code from response headers
+		statusCode := 200 // Default
+		if v.ResponseHeaders != nil && v.ResponseHeaders.Headers != nil {
+			statusCode = getStatusFromHeaders(v.ResponseHeaders.Headers)
+		}
+
+		// Update router replay with status code
+		r.updateRouterReplayStatus(ctx, statusCode, false)
+
+		return &ext_proc.ProcessingResponse{
+			Response: &ext_proc.ProcessingResponse_ResponseHeaders{
+				ResponseHeaders: &ext_proc.HeadersResponse{
+					Response: &ext_proc.CommonResponse{
+						Status: ext_proc.CommonResponse_CONTINUE,
+					},
+				},
+			},
+		}, nil
+	}
+
 	var statusCode int
 	var isSuccessful bool
 
@@ -62,8 +86,13 @@ func (r *OpenAIRouter) handleResponseHeaders(v *ext_proc.ProcessingRequest_Respo
 			metrics.RecordModelTTFT(ctx.RequestModel, ttft)
 			ctx.TTFTSeconds = ttft
 			ctx.TTFTRecorded = true
+			// Update TTFT cache for latency signal evaluation
+			classification.UpdateTTFT(ctx.RequestModel, ttft)
 		}
 	}
+
+	// Update router replay metadata with status code and streaming flag
+	r.updateRouterReplayStatus(ctx, statusCode, ctx != nil && ctx.IsStreamingResponse)
 
 	// Prepare response headers with VSR decision tracking headers if applicable
 	var headerMutation *ext_proc.HeaderMutation
@@ -88,6 +117,16 @@ func (r *OpenAIRouter) handleResponseHeaders(v *ext_proc.ProcessingRequest_Respo
 				Header: &core.HeaderValue{
 					Key:      headers.VSRSelectedDecision,
 					RawValue: []byte(ctx.VSRSelectedDecisionName),
+				},
+			})
+		}
+
+		// Add x-vsr-selected-confidence header (from decision evaluation)
+		if ctx.VSRSelectedDecisionConfidence > 0 {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.VSRSelectedConfidence,
+					RawValue: []byte(fmt.Sprintf("%.4f", ctx.VSRSelectedDecisionConfidence)),
 				},
 			})
 		}
@@ -185,6 +224,64 @@ func (r *OpenAIRouter) handleResponseHeaders(v *ext_proc.ProcessingRequest_Respo
 				Header: &core.HeaderValue{
 					Key:      headers.VSRMatchedPreference,
 					RawValue: []byte(strings.Join(ctx.VSRMatchedPreference, ",")),
+				},
+			})
+		}
+
+		if len(ctx.VSRMatchedLanguage) > 0 {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.VSRMatchedLanguage,
+					RawValue: []byte(strings.Join(ctx.VSRMatchedLanguage, ",")),
+				},
+			})
+		}
+
+		if len(ctx.VSRMatchedLatency) > 0 {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.VSRMatchedLatency,
+					RawValue: []byte(strings.Join(ctx.VSRMatchedLatency, ",")),
+				},
+			})
+		}
+
+		// Add x-vsr-matched-context header (from context signal classification)
+		if len(ctx.VSRMatchedContext) > 0 {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.VSRMatchedContext,
+					RawValue: []byte(strings.Join(ctx.VSRMatchedContext, ",")),
+				},
+			})
+		}
+
+		// Add x-vsr-context-token-count header
+		if ctx.VSRContextTokenCount > 0 {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.VSRContextTokenCount,
+					RawValue: []byte(strconv.Itoa(ctx.VSRContextTokenCount)),
+				},
+			})
+		}
+
+		// Add x-vsr-matched-complexity header (from complexity signal classification)
+		if len(ctx.VSRMatchedComplexity) > 0 {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.VSRMatchedComplexity,
+					RawValue: []byte(strings.Join(ctx.VSRMatchedComplexity, ",")),
+				},
+			})
+		}
+
+		// Attach router replay identifier when available
+		if ctx.RouterReplayID != "" {
+			setHeaders = append(setHeaders, &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:      headers.RouterReplayID,
+					RawValue: []byte(ctx.RouterReplayID),
 				},
 			})
 		}

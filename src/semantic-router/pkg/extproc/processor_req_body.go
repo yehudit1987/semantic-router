@@ -13,6 +13,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/anthropic"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/memory"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
@@ -23,7 +25,6 @@ import (
 
 // handleRequestBody processes the request body
 func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
-	logging.Infof("Processing request body: %s", string(v.RequestBody.GetBody()))
 	// Record start time for model routing
 	ctx.ProcessingStartTime = time.Now()
 	// Save the original request body
@@ -71,61 +72,75 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 	// Store the original model
 	originalModel := openAIRequest.Model
 
-	// Set model on span
-	if ctx.TraceContext != nil {
-		_, span := tracing.StartSpan(ctx.TraceContext, "parse_request")
-		tracing.SetSpanAttributes(span,
-			attribute.String(tracing.AttrOriginalModel, originalModel))
-		span.End()
-	}
-
-	// Record the initial request to this model (count all requests)
-	metrics.RecordModelRequest(originalModel)
-	// Also set the model on context early so error metrics can label it
+	// Set the model on context early so error metrics can label it
 	if ctx.RequestModel == "" {
 		ctx.RequestModel = originalModel
+	}
+
+	// Check if this is a looper internal request - if so, execute decision plugins
+	// (lookup decision by name and apply configured plugins)
+	if r.isLooperRequest(ctx) {
+		logging.Infof("[Looper] Internal request detected, executing decision plugins for model: %s", originalModel)
+		return r.handleLooperInternalRequestWithPlugins(originalModel, ctx)
 	}
 
 	// Get content from messages
 	userContent, nonUserMessages := extractUserAndNonUserContent(openAIRequest)
 
-	// Perform fact-check classification for hallucination mitigation
-	r.performFactCheckClassification(ctx, userContent)
-
-	// Check if request has tools that can provide context for fact-checking
-	r.checkRequestHasTools(ctx)
+	// Store user content for later use in hallucination detection
+	ctx.UserContent = userContent
 
 	// Perform decision evaluation and model selection once at the beginning
 	// Use decision-based routing if decisions are configured, otherwise fall back to category-based
-	decisionName, _, reasoningDecision, selectedModel := r.performDecisionEvaluationAndModelSelection(originalModel, userContent, nonUserMessages, ctx)
+	// This also evaluates fact-check signal as part of the signal evaluation
+	decisionName, _, reasoningDecision, selectedModel := r.performDecisionEvaluation(originalModel, userContent, nonUserMessages, ctx)
+
+	// Record the initial request to this model (count all requests)
+	metrics.RecordModelRequest(selectedModel)
 
 	// Perform security checks with decision-specific settings
-	if response, shouldReturn := r.performSecurityChecks(ctx, userContent, nonUserMessages, decisionName); shouldReturn {
+	if response, shouldReturn := r.performJailbreaks(ctx, userContent, nonUserMessages, decisionName); shouldReturn {
+		// Record blocked request to replay before returning
+		r.startRouterReplay(ctx, originalModel, selectedModel, decisionName)
+		r.updateRouterReplayStatus(ctx, 403, false) // 403 Forbidden for jailbreak block
 		return response, nil
 	}
 
 	// Perform PII detection and policy check (if PII policy is enabled for the decision)
 	piiResponse := r.performPIIDetection(ctx, userContent, nonUserMessages, decisionName)
 	if piiResponse != nil {
+		// Record blocked request to replay before returning
+		r.startRouterReplay(ctx, originalModel, selectedModel, decisionName)
+		r.updateRouterReplayStatus(ctx, 403, false) // 403 Forbidden for PII block
 		// PII policy violation - return error response
 		return piiResponse, nil
 	}
 
 	// Handle caching with decision-specific settings
-	logging.Infof("About to call handleCaching - decisionName=%s, cacheEnabled=%v", decisionName, r.Config.SemanticCache.Enabled)
 	if response, shouldReturn := r.handleCaching(ctx, decisionName); shouldReturn {
 		logging.Infof("handleCaching returned a response, returning immediately")
 		return response, nil
 	}
 	logging.Infof("handleCaching returned no cached response, continuing to model routing")
 
+	// Execute RAG plugin if enabled (after cache check, before other plugins)
+	// RAG plugin retrieves context and injects it into the request
+	if ragErr := r.executeRAGPlugin(ctx, decisionName); ragErr != nil {
+		// If RAG fails with on_failure=block, return error response
+		return r.createErrorResponse(503, fmt.Sprintf("RAG retrieval failed: %v", ragErr)), nil
+	}
+
 	// Handle memory retrieval (if enabled)
 	// Memory retrieval happens after cache check to avoid unnecessary work on cache hits
 	// and before model routing to inject memories into LLM context
-	requestBody, err = r.handleMemoryRetrieval(ctx, userContent, requestBody, openAIRequest)
-	if err != nil {
-		logging.Warnf("Memory retrieval failed: %v, continuing without memory", err)
+	requestBody, memErr := r.handleMemoryRetrieval(ctx, userContent, requestBody, openAIRequest)
+	if memErr != nil {
+		logging.Warnf("Memory retrieval failed: %v, continuing without memory", memErr)
 		// Graceful degradation: continue without memory if retrieval fails
+	}
+	// Update the translated body with injected memories for Response API
+	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest && len(requestBody) > 0 {
+		ctx.ResponseAPICtx.TranslatedBody = requestBody
 	}
 
 	// Handle model selection and routing with pre-computed classification results and selected model
@@ -147,15 +162,120 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.ChatCompletionNe
 
 	isAutoModel := r.Config != nil && r.Config.IsAutoModelName(originalModel)
 
+	targetModel := originalModel
 	if isAutoModel && selectedModel != "" {
-		return r.handleAutoModelRouting(openAIRequest, originalModel, decisionName, reasoningDecision, selectedModel, ctx, response)
-	} else if !isAutoModel {
-		return r.handleSpecifiedModelRouting(openAIRequest, originalModel, ctx)
+		targetModel = selectedModel
 	}
 
-	// No routing needed, return default response
-	ctx.RequestModel = originalModel
-	return response, nil
+	// Anthropic model routing
+	if r.Config.GetModelAPIFormat(targetModel) == config.APIFormatAnthropic {
+		return r.handleAnthropicRouting(openAIRequest, originalModel, targetModel, decisionName, ctx)
+	}
+
+	// OpenAI-compatible routing
+	switch {
+	case !isAutoModel:
+		return r.handleSpecifiedModelRouting(openAIRequest, originalModel, ctx)
+	case r.shouldUseLooper(ctx.VSRSelectedDecision):
+		logging.Infof("Using Looper for decision %s with algorithm %s",
+			ctx.VSRSelectedDecision.Name, ctx.VSRSelectedDecision.Algorithm.Type)
+		return r.handleLooperExecution(ctx.TraceContext, openAIRequest, ctx.VSRSelectedDecision, ctx)
+	case selectedModel != "":
+		return r.handleAutoModelRouting(openAIRequest, originalModel, decisionName, reasoningDecision, selectedModel, ctx, response)
+	default:
+		// Auto model without selection - no routing needed
+		ctx.RequestModel = originalModel
+		return response, nil
+	}
+}
+
+// handleAnthropicRouting handles routing to Anthropic Claude API via Envoy.
+// Transforms the request body from OpenAI format to Anthropic format and sets
+// appropriate headers for Envoy to route to the Anthropic cluster.
+func (r *OpenAIRouter) handleAnthropicRouting(openAIRequest *openai.ChatCompletionNewParams, originalModel string, targetModel string, decisionName string, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+	logging.Infof("Routing to Anthropic API via Envoy for model: %s (original: %s)", targetModel, originalModel)
+
+	// Reject streaming requests (not yet supported for Anthropic backend)
+	if ctx.ExpectStreamingResponse {
+		logging.Warnf("Streaming not supported for Anthropic backend, rejecting request for model: %s", targetModel)
+		return r.createErrorResponse(400, "Streaming is not supported for Anthropic models. Please set stream=false in your request."), nil
+	}
+
+	// Get API key for the model
+	accessKey := r.Config.GetModelAccessKey(targetModel)
+	if accessKey == "" {
+		logging.Errorf("No access_key configured for Anthropic model: %s", targetModel)
+		return r.createErrorResponse(500, fmt.Sprintf("No API key configured for model: %s", targetModel)), nil
+	}
+
+	// Update model in request to target model
+	openAIRequest.Model = targetModel
+
+	// Transform request body from OpenAI format to Anthropic format
+	anthropicBody, err := anthropic.ToAnthropicRequestBody(openAIRequest)
+	if err != nil {
+		logging.Errorf("Failed to transform request to Anthropic format: %v", err)
+		return r.createErrorResponse(500, fmt.Sprintf("Request transformation error: %v", err)), nil
+	}
+
+	// Track VSR decision information
+	ctx.RequestModel = targetModel
+	ctx.VSRSelectedModel = targetModel
+	ctx.APIFormat = config.APIFormatAnthropic // Mark for response transformation
+	if decisionName != "" {
+		ctx.VSRSelectedDecision = r.Config.GetDecisionByName(decisionName)
+	}
+
+	// Build header mutations using anthropic package helpers
+	anthropicHeaders := anthropic.BuildRequestHeaders(accessKey, len(anthropicBody))
+	setHeaders := make([]*core.HeaderValueOption, 0, len(anthropicHeaders)+2)
+	for _, h := range anthropicHeaders {
+		setHeaders = append(setHeaders, &core.HeaderValueOption{
+			Header: &core.HeaderValue{
+				Key:      h.Key,
+				RawValue: []byte(h.Value),
+			},
+		})
+	}
+
+	// Add x-selected-model for Envoy routing
+	setHeaders = append(setHeaders, &core.HeaderValueOption{
+		Header: &core.HeaderValue{
+			Key:      headers.SelectedModel,
+			RawValue: []byte(targetModel),
+		},
+	})
+
+	// Start upstream span and inject trace context headers
+	traceContextHeaders := r.startUpstreamSpanAndInjectHeaders(targetModel, "api.anthropic.com", ctx)
+	setHeaders = append(setHeaders, traceContextHeaders...)
+
+	// Record routing latency
+	r.recordRoutingLatency(ctx)
+
+	logging.Infof("Transformed request for Anthropic API, body size: %d bytes", len(anthropicBody))
+
+	// Return response with body and header mutations - let Envoy route to Anthropic
+	// ClearRouteCache forces Envoy to re-evaluate routing after we set x-selected-model header
+	return &ext_proc.ProcessingResponse{
+		Response: &ext_proc.ProcessingResponse_RequestBody{
+			RequestBody: &ext_proc.BodyResponse{
+				Response: &ext_proc.CommonResponse{
+					Status:          ext_proc.CommonResponse_CONTINUE,
+					ClearRouteCache: true,
+					HeaderMutation: &ext_proc.HeaderMutation{
+						SetHeaders:    setHeaders,
+						RemoveHeaders: anthropic.HeadersToRemove(),
+					},
+					BodyMutation: &ext_proc.BodyMutation{
+						Mutation: &ext_proc.BodyMutation_Body{
+							Body: anthropicBody,
+						},
+					},
+				},
+			},
+		},
+	}, nil
 }
 
 // handleAutoModelRouting handles routing for auto model selection
@@ -175,7 +295,7 @@ func (r *OpenAIRouter) handleAutoModelRouting(openAIRequest *openai.ChatCompleti
 	r.recordRoutingDecision(ctx, decisionName, originalModel, matchedModel, reasoningDecision)
 
 	// Track VSR decision information
-	// categoryName is already set in ctx.VSRSelectedCategory by performDecisionEvaluationAndModelSelection
+	// categoryName is already set in ctx.VSRSelectedCategory by performDecisionEvaluation
 	r.trackVSRDecision(ctx, ctx.VSRSelectedCategory, decisionName, matchedModel, reasoningDecision.UseReasoning)
 
 	// Track model routing metrics
@@ -204,6 +324,9 @@ func (r *OpenAIRouter) handleAutoModelRouting(openAIRequest *openai.ChatCompleti
 	// Save the actual model for token tracking
 	ctx.RequestModel = matchedModel
 
+	// Capture router replay information if enabled
+	r.startRouterReplay(ctx, originalModel, matchedModel, decisionName)
+
 	// Handle tool selection
 	r.handleToolSelectionForRequest(openAIRequest, response, ctx)
 
@@ -221,6 +344,7 @@ func (r *OpenAIRouter) handleSpecifiedModelRouting(openAIRequest *openai.ChatCom
 	ctx.VSRSelectedModel = originalModel
 	ctx.VSRReasoningMode = "off" // Non-auto models don't use reasoning mode by default
 	// PII policy check already done in performPIIDetection
+	// Memory injection already happened in handleMemoryRetrieval (before routing diverged)
 
 	// Select endpoint for the specified model
 	selectedEndpoint := r.selectEndpointForModel(ctx, originalModel)
@@ -249,23 +373,12 @@ func (r *OpenAIRouter) handleSpecifiedModelRouting(openAIRequest *openai.ChatCom
 }
 
 // selectEndpointForModel selects the best endpoint for the given model
+// Backend selection is now part of the model layer (upstream request span)
 func (r *OpenAIRouter) selectEndpointForModel(ctx *RequestContext, model string) string {
-	backendCtx, backendSpan := tracing.StartSpan(ctx.TraceContext, tracing.SpanBackendSelection)
-
 	endpointAddress, endpointFound := r.Config.SelectBestEndpointAddressForModel(model)
 	if endpointFound {
 		logging.Infof("Selected endpoint address: %s for model: %s", endpointAddress, model)
-
-		endpoints := r.Config.GetEndpointsForModel(model)
-		if len(endpoints) > 0 {
-			tracing.SetSpanAttributes(backendSpan,
-				attribute.String(tracing.AttrEndpointName, endpoints[0].Name),
-				attribute.String(tracing.AttrEndpointAddress, endpointAddress))
-		}
 	}
-
-	backendSpan.End()
-	ctx.TraceContext = backendCtx
 
 	// Store the selected endpoint in context (for routing/logging purposes)
 	ctx.SelectedEndpoint = endpointAddress
@@ -289,21 +402,31 @@ func (r *OpenAIRouter) modifyRequestBodyForAutoRouting(openAIRequest *openai.Cha
 		return nil, status.Errorf(codes.Internal, "error serializing modified request: %v", err)
 	}
 
-	if decisionName == "" {
-		return modifiedBody, nil
-	}
-	// Set reasoning mode
-	modifiedBody, err = r.setReasoningModeToRequestBody(modifiedBody, useReasoning, decisionName)
-	if err != nil {
-		logging.Errorf("Error setting reasoning mode %v to request: %v", useReasoning, err)
-		metrics.RecordRequestError(matchedModel, "serialization_error")
-		return nil, status.Errorf(codes.Internal, "error setting reasoning mode: %v", err)
+	// Only apply decision-specific modifications if a decision was matched
+	if decisionName != "" {
+		// Set reasoning mode
+		modifiedBody, err = r.setReasoningModeToRequestBody(modifiedBody, useReasoning, decisionName)
+		if err != nil {
+			logging.Errorf("Error setting reasoning mode %v to request: %v", useReasoning, err)
+			metrics.RecordRequestError(matchedModel, "serialization_error")
+			return nil, status.Errorf(codes.Internal, "error setting reasoning mode: %v", err)
+		}
+
+		// Add decision-specific system prompt if configured
+		modifiedBody, err = r.addSystemPromptIfConfigured(modifiedBody, decisionName, matchedModel, ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Add decision-specific system prompt if configured
-	modifiedBody, err = r.addSystemPromptIfConfigured(modifiedBody, decisionName, matchedModel, ctx)
-	if err != nil {
-		return nil, err
+	// Inject memory context AFTER system prompt (so it appends, not gets overwritten)
+	// NOTE: Memory injection must happen regardless of whether a decision was matched
+	if ctx.MemoryContext != "" {
+		modifiedBody, err = injectSystemMessage(modifiedBody, ctx.MemoryContext)
+		if err != nil {
+			logging.Warnf("Memory: Failed to inject memory context: %v", err)
+			// Graceful degradation: continue without memory injection
+		}
 	}
 
 	return modifiedBody, nil
@@ -360,7 +483,7 @@ func (r *OpenAIRouter) createRoutingResponse(model string, endpoint string, modi
 		})
 	}
 
-	logging.Infof("createRoutingResponse: modifiedBody length=%d, model=%s, endpoint=%s", len(modifiedBody), model, endpoint)
+	logging.Infof("createRoutingResponse: modifiedBody length=%d, model=%s", len(modifiedBody), model)
 
 	// Start upstream span and inject trace context headers
 	traceContextHeaders := r.startUpstreamSpanAndInjectHeaders(model, endpoint, ctx)
@@ -526,28 +649,37 @@ func (r *OpenAIRouter) getModelAccessKey(modelName string) string {
 	return modelConfig.AccessKey
 }
 
+// getModelParams returns a map of model names to their ModelParams
+// This is used by looper to access model-specific configuration like access_key and param_size
+func (r *OpenAIRouter) getModelParams() map[string]config.ModelParams {
+	if r.Config == nil || r.Config.ModelConfig == nil {
+		return nil
+	}
+	return r.Config.ModelConfig
+}
+
 // handleMemoryRetrieval retrieves relevant memories and injects them into the request.
-// This function is called after cache check and before model routing.
-//
-// Flow:
-//  1. Check if memory is enabled
-//  2. Use ShouldSearchMemory to decide if query should trigger memory search
-//  3. Extract conversation history from request messages
-//  4. Build search query (with context/rewriting if needed)
-//  5. Search Milvus for relevant memories
-//  6. Inject memories into request body as system message
-//
-// Returns the modified request body (or original if no memories found/injected).
-// Errors are logged but don't block request processing (graceful degradation).
+// Per-decision plugin config takes precedence over global config.
 func (r *OpenAIRouter) handleMemoryRetrieval(
 	ctx *RequestContext,
 	userContent string,
 	requestBody []byte,
 	openAIRequest *openai.ChatCompletionNewParams,
 ) ([]byte, error) {
-	// Check if memory is enabled
-	if !r.Config.Memory.Enabled {
-		logging.Debugf("Memory: Disabled in config, skipping retrieval")
+	var memoryPluginConfig *config.MemoryPluginConfig
+	if ctx.VSRSelectedDecision != nil {
+		memoryPluginConfig = ctx.VSRSelectedDecision.GetMemoryConfig()
+	}
+
+	memoryEnabled := r.Config.Memory.Enabled
+	if memoryPluginConfig != nil {
+		memoryEnabled = memoryPluginConfig.Enabled
+		if !memoryEnabled {
+			logging.Debugf("Memory: Disabled by per-decision plugin config for decision '%s'", ctx.VSRSelectedDecisionName)
+			return requestBody, nil
+		}
+	} else if !memoryEnabled {
+		logging.Debugf("Memory: Disabled in global config, skipping retrieval")
 		return requestBody, nil
 	}
 
@@ -558,11 +690,24 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 		return requestBody, nil
 	}
 
+	// TODO: Remove demo logs after POC
+	logging.Infof("╔══════════════════════════════════════════════════════════════════╗")
+	logging.Infof("║                    MEMORY RETRIEVAL FLOW                         ║")
+	logging.Infof("╠══════════════════════════════════════════════════════════════════╣")
+	logging.Infof("║ User Query: %s", truncateForLog(userContent, 50))
+	if memoryPluginConfig != nil {
+		logging.Infof("║ Config Source: per-decision plugin (decision: %s)", ctx.VSRSelectedDecisionName)
+	} else {
+		logging.Infof("║ Config Source: global config")
+	}
+
 	// Step 1: Memory decision - should we search?
 	if !ShouldSearchMemory(ctx, userContent) {
-		logging.Debugf("Memory: Query does not require memory search, skipping")
+		logging.Infof("║ Decision: ❌ SKIP (query type not suitable for memory search)")
+		logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 		return requestBody, nil
 	}
+	logging.Infof("║ Decision: ✅ SEARCH (query may benefit from memory)")
 
 	// Step 2: Extract conversation history from request body
 	// Use the existing ExtractConversationHistory function which works with raw JSON
@@ -578,12 +723,12 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 		history = []ConversationMessage{}
 	}
 
-	// Step 3: Build search query (with context/rewriting)
+	// Step 3: Build search query (with context/rewriting if memory_rewrite external model is configured)
 	searchQuery, err := BuildSearchQuery(
 		ctx.TraceContext,
 		history,
 		userContent,
-		&r.Config.Memory.QueryRewrite,
+		r.Config,
 	)
 	if err != nil {
 		logging.Warnf("Memory: Query rewriting failed, using original query: %v", err)
@@ -593,16 +738,30 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 	// Step 4: Get user ID from Response API context or request
 	userID := r.getUserIDFromContext(ctx)
 	if userID == "" {
-		logging.Debugf("Memory: No user ID available, skipping retrieval")
+		logging.Infof("║ User ID: ❌ NOT FOUND (skipping memory search)")
+		logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 		return requestBody, nil
 	}
+	logging.Infof("║ User ID: %s", userID)
 
-	// Step 5: Search Milvus for relevant memories
+	// Step 5: Search Milvus (per-decision settings override global defaults)
+	retrieveLimit := r.Config.Memory.DefaultRetrievalLimit
+	retrieveThreshold := r.Config.Memory.DefaultSimilarityThreshold
+
+	if memoryPluginConfig != nil {
+		if memoryPluginConfig.RetrievalLimit != nil {
+			retrieveLimit = *memoryPluginConfig.RetrievalLimit
+		}
+		if memoryPluginConfig.SimilarityThreshold != nil {
+			retrieveThreshold = *memoryPluginConfig.SimilarityThreshold
+		}
+	}
+
 	retrieveOpts := memory.RetrieveOptions{
 		Query:     searchQuery,
 		UserID:    userID,
-		Limit:     r.Config.Memory.DefaultRetrievalLimit,
-		Threshold: r.Config.Memory.DefaultSimilarityThreshold,
+		Limit:     retrieveLimit,
+		Threshold: retrieveThreshold,
 	}
 
 	// Apply defaults if not configured
@@ -619,19 +778,36 @@ func (r *OpenAIRouter) handleMemoryRetrieval(
 	}
 
 	if len(memories) == 0 {
-		logging.Debugf("Memory: No relevant memories found for query: %s", searchQuery)
+		logging.Infof("║ Search Result: 📭 No memories found above threshold")
+		logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 		return requestBody, nil
 	}
 
-	logging.Infof("Memory: Retrieved %d memories for query: %s", len(memories), searchQuery)
+	logging.Infof("║ Search Result: 📬 Found %d memories!", len(memories))
+	for i, mem := range memories {
+		if mem.Memory != nil {
+			logging.Infof("║   %d. [%s] (score: %.2f) %s", i+1, mem.Memory.Type, mem.Score, mem.Memory.Content) // Full content for demo
+		}
+	}
+	logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 
-	// Step 6: Inject memories into request body
-	modifiedBody, err := InjectMemories(requestBody, memories)
-	if err != nil {
-		return requestBody, fmt.Errorf("memory injection failed: %w", err)
+	// Step 6: Format memory context and inject into request body
+	ctx.MemoryContext = FormatMemoriesAsContext(memories)
+
+	// Step 7: Inject memory into request body as system message
+	// This happens here (before routing diverges) so it works for BOTH auto and specified models
+	if ctx.MemoryContext != "" {
+		injectedBody, err := injectSystemMessage(requestBody, ctx.MemoryContext)
+		if err != nil {
+			logging.Warnf("Memory: Failed to inject memory context: %v", err)
+			// Graceful degradation: continue without injection
+			return requestBody, nil
+		}
+		logging.Infof("Memory: Injected %d memories into request", len(memories))
+		return injectedBody, nil
 	}
 
-	return modifiedBody, nil
+	return requestBody, nil
 }
 
 // getMemoryStore returns the memory store instance.
@@ -643,9 +819,8 @@ func (r *OpenAIRouter) getMemoryStore() *memory.MilvusStore {
 // getUserIDFromContext extracts user ID from Response API context or request.
 func (r *OpenAIRouter) getUserIDFromContext(ctx *RequestContext) string {
 	// Check Response API context first
+	// userID is provided via metadata.user_id (OpenAI API spec-compliant)
 	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.OriginalRequest != nil {
-		// TODO: Extract from MemoryContext when it's added to ResponseAPIRequest
-		// For now, try to extract from metadata or other fields
 		if ctx.ResponseAPICtx.OriginalRequest.Metadata != nil {
 			if userID, ok := ctx.ResponseAPICtx.OriginalRequest.Metadata["user_id"]; ok {
 				return userID
@@ -653,7 +828,5 @@ func (r *OpenAIRouter) getUserIDFromContext(ctx *RequestContext) string {
 		}
 	}
 
-	// TODO: Extract from request body if available
-	// For now, return empty string if not in Response API context
 	return ""
 }

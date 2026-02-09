@@ -10,7 +10,6 @@ import (
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 
-	candle_binding "github.com/vllm-project/semantic-router/candle-binding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
@@ -24,12 +23,13 @@ const (
 
 // MilvusStore provides memory retrieval from Milvus with similarity threshold filtering
 type MilvusStore struct {
-	client         client.Client
-	collectionName string
-	config         config.MemoryConfig
-	enabled        bool
-	maxRetries     int
-	retryBaseDelay time.Duration
+	client          client.Client
+	collectionName  string
+	config          config.MemoryConfig
+	enabled         bool
+	maxRetries      int
+	retryBaseDelay  time.Duration
+	embeddingConfig EmbeddingConfig // Unified embedding configuration
 }
 
 // MilvusStoreOptions contains configuration for creating a MilvusStore
@@ -38,11 +38,13 @@ type MilvusStore struct {
 //	CollectionName is the name of the Milvus collection
 //	Config is the memory configuration
 //	Enabled controls whether the store is active
+//	EmbeddingConfig is the unified embedding configuration (optional, defaults to mmbert/768)
 type MilvusStoreOptions struct {
-	Client         client.Client
-	CollectionName string
-	Config         config.MemoryConfig
-	Enabled        bool
+	Client          client.Client
+	CollectionName  string
+	Config          config.MemoryConfig
+	Enabled         bool
+	EmbeddingConfig *EmbeddingConfig // Optional: if nil, derived from Config.Embedding
 }
 
 // NewMilvusStore creates a new MilvusStore instance
@@ -55,32 +57,157 @@ func NewMilvusStore(options MilvusStoreOptions) (*MilvusStore, error) {
 	}
 
 	if options.Client == nil {
-		return nil, fmt.Errorf("Milvus client is required")
+		return nil, fmt.Errorf("milvus client is required")
 	}
 
 	if options.CollectionName == "" {
-		return nil, fmt.Errorf("Collection name is required")
+		return nil, fmt.Errorf("collection name is required")
 	}
 
 	// Use default config if not provided
-	config := options.Config
-	if config.Embedding.Model == "" {
-		config = DefaultMemoryConfig()
+	cfg := options.Config
+	if cfg.EmbeddingModel == "" {
+		cfg = DefaultMemoryConfig()
+	}
+
+	// Initialize embedding configuration
+	var embeddingCfg EmbeddingConfig
+	if options.EmbeddingConfig != nil {
+		embeddingCfg = *options.EmbeddingConfig
+	} else {
+		embeddingCfg = EmbeddingConfig{Model: EmbeddingModelBERT}
 	}
 
 	store := &MilvusStore{
-		client:         options.Client,
-		collectionName: options.CollectionName,
-		config:         config,
-		enabled:        options.Enabled,
-		maxRetries:     DefaultMaxRetries,
-		retryBaseDelay: DefaultRetryBaseDelay * time.Millisecond,
+		client:          options.Client,
+		collectionName:  options.CollectionName,
+		config:          cfg,
+		enabled:         options.Enabled,
+		maxRetries:      DefaultMaxRetries,
+		retryBaseDelay:  DefaultRetryBaseDelay * time.Millisecond,
+		embeddingConfig: embeddingCfg,
 	}
 
-	logging.Debugf("MilvusStore: initialized with collection='%s', model='%s', dimension=%d",
-		store.collectionName, store.config.Embedding.Model, store.config.Embedding.Dimension)
+	// Auto-create collection if it doesn't exist
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.ensureCollection(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure collection exists: %w", err)
+	}
+
+	logging.Infof("MilvusStore: initialized with collection='%s', embedding_model='%s'",
+		store.collectionName, store.embeddingConfig.Model)
 
 	return store, nil
+}
+
+// ensureCollection checks if the collection exists and creates it if not
+func (m *MilvusStore) ensureCollection(ctx context.Context) error {
+	hasCollection, err := m.client.HasCollection(ctx, m.collectionName)
+	if err != nil {
+		return fmt.Errorf("failed to check collection existence: %w", err)
+	}
+
+	if hasCollection {
+		logging.Debugf("MilvusStore: collection '%s' already exists", m.collectionName)
+		// Load collection to make it queryable
+		if loadErr := m.client.LoadCollection(ctx, m.collectionName, false); loadErr != nil {
+			logging.Warnf("MilvusStore: failed to load collection: %v (may already be loaded)", loadErr)
+		}
+		return nil
+	}
+
+	logging.Infof("MilvusStore: creating collection '%s' with dimension %d", m.collectionName, m.config.Milvus.Dimension)
+
+	// Define schema for agentic memory
+	schema := &entity.Schema{
+		CollectionName: m.collectionName,
+		Description:    "Agentic Memory storage for cross-session context",
+		AutoID:         false,
+		Fields: []*entity.Field{
+			{
+				Name:       "id",
+				DataType:   entity.FieldTypeVarChar,
+				PrimaryKey: true,
+				TypeParams: map[string]string{"max_length": "64"},
+			},
+			{
+				Name:       "user_id",
+				DataType:   entity.FieldTypeVarChar,
+				TypeParams: map[string]string{"max_length": "256"},
+			},
+			{
+				Name:       "project_id",
+				DataType:   entity.FieldTypeVarChar,
+				TypeParams: map[string]string{"max_length": "256"},
+			},
+			{
+				Name:       "memory_type",
+				DataType:   entity.FieldTypeVarChar,
+				TypeParams: map[string]string{"max_length": "32"},
+			},
+			{
+				Name:       "content",
+				DataType:   entity.FieldTypeVarChar,
+				TypeParams: map[string]string{"max_length": "65535"},
+			},
+			{
+				Name:       "source",
+				DataType:   entity.FieldTypeVarChar,
+				TypeParams: map[string]string{"max_length": "256"},
+			},
+			{
+				Name:       "metadata",
+				DataType:   entity.FieldTypeVarChar,
+				TypeParams: map[string]string{"max_length": "65535"},
+			},
+			{
+				Name:     "embedding",
+				DataType: entity.FieldTypeFloatVector,
+				TypeParams: map[string]string{
+					"dim": fmt.Sprintf("%d", m.config.Milvus.Dimension),
+				},
+			},
+			{
+				Name:     "created_at",
+				DataType: entity.FieldTypeInt64,
+			},
+			{
+				Name:     "updated_at",
+				DataType: entity.FieldTypeInt64,
+			},
+			{
+				Name:     "access_count",
+				DataType: entity.FieldTypeInt64,
+			},
+			{
+				Name:     "importance",
+				DataType: entity.FieldTypeFloat,
+			},
+		},
+	}
+
+	// Create collection
+	if createErr := m.client.CreateCollection(ctx, schema, 1); createErr != nil {
+		return fmt.Errorf("failed to create collection: %w", createErr)
+	}
+
+	// Create HNSW index for vector search
+	index, err := entity.NewIndexHNSW(entity.COSINE, 16, 256) // M=16, efConstruction=256
+	if err != nil {
+		return fmt.Errorf("failed to create HNSW index: %w", err)
+	}
+	if err := m.client.CreateIndex(ctx, m.collectionName, "embedding", index, false); err != nil {
+		return fmt.Errorf("failed to create index: %w", err)
+	}
+
+	// Load collection to make it queryable
+	if err := m.client.LoadCollection(ctx, m.collectionName, false); err != nil {
+		return fmt.Errorf("failed to load collection: %w", err)
+	}
+
+	logging.Infof("MilvusStore: collection '%s' created and loaded successfully", m.collectionName)
+	return nil
 }
 
 // Retrieve searches for memories in Milvus with similarity threshold filtering
@@ -101,37 +228,33 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 	}
 
 	if opts.Query == "" {
-		return nil, fmt.Errorf("Query is required")
+		return nil, fmt.Errorf("query is required")
 	}
 
 	if opts.UserID == "" {
-		return nil, fmt.Errorf("User id is required")
+		return nil, fmt.Errorf("user id is required")
 	}
 
+	// TODO: Remove demo logging after POC
+	logging.Infof("╔══════════════════════════════════════════════════════════════════╗")
+	logging.Infof("║                 MEMORY RETRIEVE (MILVUS)                         ║")
+	logging.Infof("╠══════════════════════════════════════════════════════════════════╣")
+	logging.Infof("║ Query:     %s", truncateForLog(opts.Query, 100))
+	logging.Infof("║ UserID:    %s", opts.UserID)
+	logging.Infof("║ Limit:     %d", limit)
+	logging.Infof("║ Threshold: %.4f", threshold)
+	logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 	logging.Debugf("MilvusStore.Retrieve: query='%s', user_id='%s', limit=%d, threshold=%.4f",
 		opts.Query, opts.UserID, limit, threshold)
 
-	// Generate embedding for the query using all-MiniLM-L6-v2 (384-dim)
-	// Note: The candle_binding.GetEmbedding uses the initialized model
-	// For all-MiniLM-L6-v2, we need to ensure it's initialized
-	embedding, err := candle_binding.GetEmbedding(opts.Query, 512)
+	// Generate embedding for the query
+	embedding, err := GenerateEmbedding(opts.Query, m.embeddingConfig)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to generate embedding: %w", err)
+		return nil, fmt.Errorf("failed to generate embedding: %w", err)
 	}
 
-	// Validate embedding dimension matches expected
-	expectedDim := m.config.Embedding.Dimension
-	if expectedDim == 0 {
-		expectedDim = 384 // Default for all-MiniLM-L6-v2
-	}
-
-	if len(embedding) != expectedDim {
-		logging.Warnf("MilvusStore.Retrieve: embedding dimension mismatch - got %d, expected %d",
-			len(embedding), expectedDim)
-		// Continue anyway, but log the warning
-	}
-
-	logging.Debugf("MilvusStore.Retrieve: generated embedding with dimension %d", len(embedding))
+	logging.Debugf("MilvusStore.Retrieve: generated embedding with model=%s, dimension=%d",
+		m.embeddingConfig.Model, len(embedding))
 
 	// Build filter expression for user_id
 	filterExpr := fmt.Sprintf("user_id == \"%s\"", opts.UserID)
@@ -155,7 +278,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 	// Using HNSW index with ef parameter (adjust based on your index configuration)
 	searchParam, err := entity.NewIndexHNSWSearchParam(64)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create search parameters: %w", err)
+		return nil, fmt.Errorf("failed to create search parameters: %w", err)
 	}
 
 	// Perform vector search in Milvus with retry logic
@@ -183,7 +306,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 		return retryErr
 	})
 	if err != nil {
-		return nil, fmt.Errorf("Milvus search failed after retries: %w", err)
+		return nil, fmt.Errorf("milvus search failed after retries: %w", err)
 	}
 
 	if len(searchResult) == 0 || searchResult[0].ResultCount == 0 {
@@ -227,7 +350,7 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 
 		// Extract fields to build MemoryHit
 		var id, content, memType string
-		var metadata map[string]interface{} = make(map[string]interface{})
+		metadata := make(map[string]interface{})
 
 		// Extract ID
 		if idIdx >= 0 && idIdx < len(fields) {
@@ -330,6 +453,14 @@ func (m *MilvusStore) Retrieve(ctx context.Context, opts RetrieveOptions) ([]*Re
 	logging.Debugf("MilvusStore.Retrieve: returning %d results (filtered from %d candidates)",
 		len(results), len(scores))
 
+	// TODO: Remove demo logging after POC
+	logging.Infof("╔══════════════════════════════════════════════════════════════════╗")
+	logging.Infof("║ MEMORY RETRIEVE RESULTS: %d memories found                       ║", len(results))
+	logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
+	for i, r := range results {
+		logging.Infof("  %d. [%.3f] %s: %s", i+1, r.Score, r.Memory.Type, r.Memory.Content) // Full content for demo
+	}
+
 	return results, nil
 }
 
@@ -385,8 +516,15 @@ func (m *MilvusStore) Store(ctx context.Context, memory *Memory) error {
 		return fmt.Errorf("user ID is required")
 	}
 
-	logging.Debugf("MilvusStore.Store: storing memory id=%s, user_id=%s, type=%s",
-		memory.ID, memory.UserID, memory.Type)
+	// TODO: Remove demo logs after POC
+	logging.Infof("╔══════════════════════════════════════════════════════════════════╗")
+	logging.Infof("║                    MEMORY STORE (MILVUS)                         ║")
+	logging.Infof("╠══════════════════════════════════════════════════════════════════╣")
+	logging.Infof("║ ID:      %s", memory.ID)
+	logging.Infof("║ User:    %s", memory.UserID)
+	logging.Infof("║ Type:    %s", memory.Type)
+	logging.Infof("║ Content: %s", memory.Content) // Full content for demo
+	logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 
 	// Generate embedding for content if not already set
 	var embedding []float32
@@ -394,22 +532,10 @@ func (m *MilvusStore) Store(ctx context.Context, memory *Memory) error {
 		embedding = memory.Embedding
 	} else {
 		var err error
-		embedding, err = candle_binding.GetEmbedding(memory.Content, 512)
+		embedding, err = GenerateEmbedding(memory.Content, m.embeddingConfig)
 		if err != nil {
 			return fmt.Errorf("failed to generate embedding: %w", err)
 		}
-	}
-
-	// Validate embedding dimension
-	// NOTE: We log a warning but continue to allow resilience. In production,
-	// consider returning an error in strict mode if dimensions don't match.
-	expectedDim := m.config.Embedding.Dimension
-	if expectedDim == 0 {
-		expectedDim = 384
-	}
-	if len(embedding) != expectedDim {
-		logging.Warnf("MilvusStore.Store: embedding dimension mismatch - got %d, expected %d",
-			len(embedding), expectedDim)
 	}
 
 	// Set timestamps
@@ -433,14 +559,28 @@ func (m *MilvusStore) Store(ctx context.Context, memory *Memory) error {
 	}
 
 	// Create columns for insert
+	// Use defaults for optional fields if not provided (all fields required by schema)
+	projectID := memory.ProjectID
+	if projectID == "" {
+		projectID = "default"
+	}
+	source := memory.Source
+	if source == "" {
+		source = "extraction" // Default source for extracted memories
+	}
+
 	idCol := entity.NewColumnVarChar("id", []string{memory.ID})
 	contentCol := entity.NewColumnVarChar("content", []string{memory.Content})
 	userIDCol := entity.NewColumnVarChar("user_id", []string{memory.UserID})
+	projectIDCol := entity.NewColumnVarChar("project_id", []string{projectID})
 	memTypeCol := entity.NewColumnVarChar("memory_type", []string{string(memory.Type)})
+	sourceCol := entity.NewColumnVarChar("source", []string{source})
 	metadataCol := entity.NewColumnVarChar("metadata", []string{string(metadataJSON)})
-	embeddingCol := entity.NewColumnFloatVector("embedding", expectedDim, [][]float32{embedding})
+	embeddingCol := entity.NewColumnFloatVector("embedding", len(embedding), [][]float32{embedding})
 	createdAtCol := entity.NewColumnInt64("created_at", []int64{memory.CreatedAt.Unix()})
 	updatedAtCol := entity.NewColumnInt64("updated_at", []int64{memory.UpdatedAt.Unix()})
+	accessCountCol := entity.NewColumnInt64("access_count", []int64{int64(memory.AccessCount)})
+	importanceCol := entity.NewColumnFloat("importance", []float32{float32(memory.Importance)})
 
 	// Insert with retry logic
 	err = m.retryWithBackoff(ctx, func() error {
@@ -451,11 +591,15 @@ func (m *MilvusStore) Store(ctx context.Context, memory *Memory) error {
 			idCol,
 			contentCol,
 			userIDCol,
+			projectIDCol,
 			memTypeCol,
+			sourceCol,
 			metadataCol,
 			embeddingCol,
 			createdAtCol,
 			updatedAtCol,
+			accessCountCol,
+			importanceCol,
 		)
 		return insertErr
 	})
@@ -862,7 +1006,14 @@ func (m *MilvusStore) retryWithBackoff(ctx context.Context, operation func() err
 		}
 
 		// Calculate exponential backoff delay
-		delay := m.retryBaseDelay * time.Duration(1<<uint(attempt)) // 2^attempt * baseDelay
+		// Cap the exponent to avoid overflow (max 30 for safety)
+		exponent := attempt
+		if exponent < 0 {
+			exponent = 0
+		} else if exponent > 30 {
+			exponent = 30
+		}
+		delay := m.retryBaseDelay * time.Duration(1<<exponent) // 2^attempt * baseDelay
 
 		logging.Debugf("MilvusStore: transient error on attempt %d/%d, retrying in %v: %v",
 			attempt+1, m.maxRetries, delay, lastErr)

@@ -1,8 +1,9 @@
 ---
 translation:
-  source_commit: "bac2743"
+  source_commit: "b5ce25d"
   source_file: "docs/overview/collective-intelligence.md"
   outdated: false
+is_mtpe: true
 sidebar_position: 3
 ---
 
@@ -32,7 +33,7 @@ sidebar_position: 3
 ```
 用户查询 → Signal Extraction → Decision Engine → 最佳模型 → 响应
               ↓          ↓            ↓
-           6 种 signal 类型   AND/OR 规则   专业化模型
+           8 种 signal 类型   AND/OR 规则   专业化模型
               ↓          ↓            ↓
            上下文分析     智能选择      Plugin Chain
 ```
@@ -58,6 +59,7 @@ sidebar_position: 3
 | **fact_check** | 真理验证需求 |
 | **user_feedback** | 用户满意度 |
 | **preference** | 意图匹配 |
+| **language** | 多语言检测 |
 
 **Collective 效益**：signal 的组合提供了比任何单一 signal 更丰富的理解。
 

@@ -126,6 +126,7 @@ const sidebars: SidebarsConfig = {
         'cookbook/classifier-tuning',
         'cookbook/pii-policy',
         'cookbook/vllm-endpoints',
+        'cookbook/anthropic-models',
       ],
     },
     {
@@ -145,6 +146,16 @@ const sidebars: SidebarsConfig = {
         'troubleshooting/container-connectivity',
         'troubleshooting/vsr-headers',
         'troubleshooting/common-errors',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Contributing',
+      items: [
+        'community/overview',
+        'community/development',
+        'community/documentation',
+        'community/code-style',
       ],
     },
   ],

@@ -44,19 +44,20 @@ const HomepageHeader: React.FC = () => {
               <strong>
                 <Translate id="homepage.hero.mixtureOfModels">Mixture-of-Models</Translate>
               </strong>
+              {' '}
               🧠
               <span className={styles.techBadges}>
                 <span className={styles.techBadge}>
                   🧬
-                  <Translate id="homepage.hero.badge.neural">Neural Networks</Translate>
+                  <Translate id="homepage.hero.badge.neural"> Neural Networks</Translate>
                 </span>
                 <span className={styles.techBadge}>
                   ⚡
-                  <Translate id="homepage.hero.badge.llm">LLM Routing</Translate>
+                  <Translate id="homepage.hero.badge.llm"> LLM Routing</Translate>
                 </span>
                 <span className={styles.techBadge}>
                   ♻️
-                  <Translate id="homepage.hero.badge.economics">Per-token Unit Economics</Translate>
+                  <Translate id="homepage.hero.badge.economics"> Per-token Unit Economics</Translate>
                 </span>
               </span>
             </p>
@@ -68,12 +69,18 @@ const HomepageHeader: React.FC = () => {
         <div className={styles.buttons}>
           <Link
             className="button button--secondary button--lg"
-            to="/docs/intro"
+            to="/docs/installation/"
           >
-            🚀
-            {' '}
-            <Translate id="homepage.hero.getStarted">Get Started - 5min ⏱️</Translate>
+            <Translate id="homepage.hero.getStarted">Get Started ⏱️</Translate>
           </Link>
+          <a
+            className="button button--outline button--lg"
+            href="https://play.vllm-semantic-router.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <Translate id="homepage.hero.publicBeta">Public Beta ☁️</Translate>
+          </a>
         </div>
       </div>
     </header>

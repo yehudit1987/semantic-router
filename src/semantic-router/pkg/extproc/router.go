@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/milvus-io/milvus-sdk-go/v2/client"
 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 
@@ -19,6 +21,9 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/memory"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/responsestore"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/routerreplay"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/routerreplay/store"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/selection"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/tools"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/pii"
@@ -33,8 +38,13 @@ type OpenAIRouter struct {
 	Cache                cache.CacheBackend
 	ToolsDatabase        *tools.ToolsDatabase
 	ResponseAPIFilter    *ResponseAPIFilter
-	MemoryStore          *memory.MilvusStore
-	MemoryExtractor      *memory.MemoryExtractor
+	ReplayRecorder       *routerreplay.Recorder
+	// ModelSelector is the registry of advanced model selection algorithms
+	// Initialized from config.IntelligentRouting.ModelSelection
+	ModelSelector   *selection.Registry
+	ReplayRecorders map[string]*routerreplay.Recorder
+	MemoryStore     *memory.MilvusStore
+	MemoryExtractor *memory.MemoryExtractor
 }
 
 // Ensure OpenAIRouter implements the ext_proc calls
@@ -92,18 +102,29 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		logging.Infof("Loaded jailbreak mapping with %d jailbreak types", jailbreakMapping.GetJailbreakTypeCount())
 	}
 
-	// Initialize the BERT model for similarity search (only if configured)
-	if cfg.BertModel.ModelID != "" {
-		if initErr := candle_binding.InitModel(cfg.BertModel.ModelID, cfg.BertModel.UseCPU); initErr != nil {
-			return nil, fmt.Errorf("failed to initialize BERT model: %w", initErr)
-		}
-		logging.Infof("BERT similarity model initialized: %s", cfg.BertModel.ModelID)
-	} else {
-		logging.Infof("BERT model not configured, skipping initialization")
-	}
-
 	categoryDescriptions := cfg.GetCategoryDescriptions()
 	logging.Debugf("Category descriptions: %v", categoryDescriptions)
+
+	// Auto-detect embedding model for semantic cache from embedding_models configuration
+	// This provides a unified configuration entry point
+	embeddingModel := cfg.SemanticCache.EmbeddingModel
+	if embeddingModel == "" {
+		// Auto-select based on embedding_models configuration
+		if cfg.EmbeddingModels.MmBertModelPath != "" {
+			embeddingModel = "mmbert"
+			logging.Infof("Auto-selected mmbert for semantic cache (from embedding_models.mmbert_model_path)")
+		} else if cfg.EmbeddingModels.Qwen3ModelPath != "" {
+			embeddingModel = "qwen3"
+			logging.Infof("Auto-selected qwen3 for semantic cache (from embedding_models.qwen3_model_path)")
+		} else if cfg.EmbeddingModels.GemmaModelPath != "" {
+			embeddingModel = "gemma"
+			logging.Infof("Auto-selected gemma for semantic cache (from embedding_models.gemma_model_path)")
+		} else {
+			// Fallback to bert if no embedding models configured
+			embeddingModel = "bert"
+			logging.Warnf("No embedding models configured, falling back to bert for semantic cache")
+		}
+	}
 
 	// Create semantic cache with config options
 	cacheConfig := cache.CacheConfig{
@@ -113,8 +134,10 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		MaxEntries:          cfg.SemanticCache.MaxEntries,
 		TTLSeconds:          cfg.SemanticCache.TTLSeconds,
 		EvictionPolicy:      cache.EvictionPolicyType(cfg.SemanticCache.EvictionPolicy),
+		Redis:               cfg.SemanticCache.Redis,
+		Milvus:              cfg.SemanticCache.Milvus,
 		BackendConfigPath:   cfg.SemanticCache.BackendConfigPath,
-		EmbeddingModel:      cfg.SemanticCache.EmbeddingModel,
+		EmbeddingModel:      embeddingModel,
 	}
 
 	// Use default backend type if not specified
@@ -147,6 +170,8 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 	toolsOptions := tools.ToolsDatabaseOptions{
 		SimilarityThreshold: toolsThreshold,
 		Enabled:             cfg.Tools.Enabled,
+		ModelType:           cfg.EmbeddingModels.HNSWConfig.ModelType,       // Pass model type from config
+		TargetDimension:     cfg.EmbeddingModels.HNSWConfig.TargetDimension, // Pass target dimension from config
 	}
 	toolsDatabase := tools.NewToolsDatabase(toolsOptions)
 
@@ -166,17 +191,11 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		return nil, fmt.Errorf("failed to create classifier: %w", err)
 	}
 
-	// Create global classification service for API access with auto-discovery
-	// This will prioritize LoRA models over legacy ModernBERT
-	autoSvc, err := services.NewClassificationServiceWithAutoDiscovery(cfg)
-	if err != nil {
-		logging.Warnf("Auto-discovery failed during router initialization: %v, using legacy classifier", err)
-		services.NewClassificationService(classifier, cfg)
-	} else {
-		logging.Infof("Router initialization: Using auto-discovered unified classifier")
-		// The service is already set as global in NewUnifiedClassificationService
-		_ = autoSvc
-	}
+	// Immediately set global classification service so API server can access it
+	// This prevents API server from creating a duplicate classifier due to timeout
+	// The API server starts concurrently and may timeout waiting for the global service
+	services.NewClassificationService(classifier, cfg)
+	logging.Infof("Global classification service initialized with legacy classifier")
 
 	// Create Response API filter if enabled
 	var responseAPIFilter *ResponseAPIFilter
@@ -190,9 +209,171 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		}
 	}
 
+	// Initialize router replay recorders (one per decision with replay enabled)
+	replayRecorders := initializeReplayRecorders(cfg)
+
+	// Keep first recorder for backward compatibility
+	var replayRecorder *routerreplay.Recorder
+	for _, recorder := range replayRecorders {
+		replayRecorder = recorder
+		break
+	}
+
+	// Initialize model selection registry with default configs
+	// Actual selection method is determined per-decision via algorithm config (aligned with looper)
+	modelSelectionCfg := &selection.ModelSelectionConfig{
+		Method: "static", // Default; per-decision algorithm overrides this
+	}
+
+	// Scan decisions for per-decision algorithm configs (aligned with PR #1089)
+	// Per-decision config takes precedence over global config
+	var eloFromDecision *config.EloSelectionConfig
+	var routerDCFromDecision *config.RouterDCSelectionConfig
+	for _, decision := range cfg.IntelligentRouting.Decisions {
+		if decision.Algorithm != nil {
+			if decision.Algorithm.Type == "elo" && decision.Algorithm.Elo != nil && eloFromDecision == nil {
+				eloFromDecision = decision.Algorithm.Elo
+			}
+			if decision.Algorithm.Type == "router_dc" && decision.Algorithm.RouterDC != nil && routerDCFromDecision == nil {
+				routerDCFromDecision = decision.Algorithm.RouterDC
+			}
+		}
+	}
+
+	// Build Elo config: per-decision takes precedence, then global, then defaults
+	eloCfg := cfg.IntelligentRouting.ModelSelection.Elo
+	modelSelectionCfg.Elo = &selection.EloConfig{
+		InitialRating:     eloCfg.InitialRating,
+		KFactor:           eloCfg.KFactor,
+		CategoryWeighted:  eloCfg.CategoryWeighted,
+		DecayFactor:       eloCfg.DecayFactor,
+		MinComparisons:    eloCfg.MinComparisons,
+		CostScalingFactor: eloCfg.CostScalingFactor,
+		StoragePath:       eloCfg.StoragePath,
+		AutoSaveInterval:  eloCfg.AutoSaveInterval,
+	}
+	// Override with per-decision config if present
+	if eloFromDecision != nil {
+		if eloFromDecision.StoragePath != "" {
+			modelSelectionCfg.Elo.StoragePath = eloFromDecision.StoragePath
+		}
+		if eloFromDecision.AutoSaveInterval != "" {
+			modelSelectionCfg.Elo.AutoSaveInterval = eloFromDecision.AutoSaveInterval
+		}
+		if eloFromDecision.KFactor != 0 {
+			modelSelectionCfg.Elo.KFactor = eloFromDecision.KFactor
+		}
+		if eloFromDecision.InitialRating != 0 {
+			modelSelectionCfg.Elo.InitialRating = eloFromDecision.InitialRating
+		}
+		modelSelectionCfg.Elo.CategoryWeighted = eloFromDecision.CategoryWeighted
+	}
+
+	// Build RouterDC config: per-decision takes precedence
+	routerDCCfg := cfg.IntelligentRouting.ModelSelection.RouterDC
+	modelSelectionCfg.RouterDC = &selection.RouterDCConfig{
+		Temperature:         routerDCCfg.Temperature,
+		DimensionSize:       routerDCCfg.DimensionSize,
+		MinSimilarity:       routerDCCfg.MinSimilarity,
+		UseQueryContrastive: routerDCCfg.UseQueryContrastive,
+		UseModelContrastive: routerDCCfg.UseModelContrastive,
+		RequireDescriptions: routerDCCfg.RequireDescriptions,
+		UseCapabilities:     routerDCCfg.UseCapabilities,
+	}
+	// Override with per-decision config if present
+	if routerDCFromDecision != nil {
+		if routerDCFromDecision.Temperature != 0 {
+			modelSelectionCfg.RouterDC.Temperature = routerDCFromDecision.Temperature
+		}
+		modelSelectionCfg.RouterDC.RequireDescriptions = routerDCFromDecision.RequireDescriptions
+		modelSelectionCfg.RouterDC.UseCapabilities = routerDCFromDecision.UseCapabilities
+	}
+
+	// Copy AutoMix config
+	autoMixCfg := cfg.IntelligentRouting.ModelSelection.AutoMix
+	modelSelectionCfg.AutoMix = &selection.AutoMixConfig{
+		VerificationThreshold:  autoMixCfg.VerificationThreshold,
+		MaxEscalations:         autoMixCfg.MaxEscalations,
+		CostAwareRouting:       autoMixCfg.CostAwareRouting,
+		CostQualityTradeoff:    autoMixCfg.CostQualityTradeoff,
+		DiscountFactor:         autoMixCfg.DiscountFactor,
+		UseLogprobVerification: autoMixCfg.UseLogprobVerification,
+	}
+
+	// Copy Hybrid config
+	hybridCfg := cfg.IntelligentRouting.ModelSelection.Hybrid
+	modelSelectionCfg.Hybrid = &selection.HybridConfig{
+		EloWeight:           hybridCfg.EloWeight,
+		RouterDCWeight:      hybridCfg.RouterDCWeight,
+		AutoMixWeight:       hybridCfg.AutoMixWeight,
+		CostWeight:          hybridCfg.CostWeight,
+		QualityGapThreshold: hybridCfg.QualityGapThreshold,
+		NormalizeScores:     hybridCfg.NormalizeScores,
+	}
+
+	// Copy ML config for KNN, KMeans, SVM selectors
+	mlCfg := cfg.IntelligentRouting.ModelSelection.ML
+	if mlCfg.ModelsPath != "" || mlCfg.KNN.PretrainedPath != "" || mlCfg.KMeans.PretrainedPath != "" || mlCfg.SVM.PretrainedPath != "" {
+		modelSelectionCfg.ML = &selection.MLSelectorConfig{
+			ModelsPath:   mlCfg.ModelsPath,
+			EmbeddingDim: mlCfg.EmbeddingDim,
+			KNN: &selection.KNNConfig{
+				K:              mlCfg.KNN.K,
+				PretrainedPath: mlCfg.KNN.PretrainedPath,
+			},
+			KMeans: &selection.KMeansConfig{
+				NumClusters:      mlCfg.KMeans.NumClusters,
+				EfficiencyWeight: mlCfg.KMeans.EfficiencyWeight,
+				PretrainedPath:   mlCfg.KMeans.PretrainedPath,
+			},
+			SVM: &selection.SVMConfig{
+				Kernel:         mlCfg.SVM.Kernel,
+				Gamma:          mlCfg.SVM.Gamma,
+				PretrainedPath: mlCfg.SVM.PretrainedPath,
+			},
+		}
+		logging.Infof("[Router] ML model selection enabled with models_path=%s", mlCfg.ModelsPath)
+	}
+
+	// Create selection factory and initialize all selectors
+	selectionFactory := selection.NewFactory(modelSelectionCfg)
+	if cfg.BackendModels.ModelConfig != nil {
+		selectionFactory = selectionFactory.WithModelConfig(cfg.BackendModels.ModelConfig)
+	}
+	if len(cfg.Categories) > 0 {
+		selectionFactory = selectionFactory.WithCategories(cfg.Categories)
+	}
+	// Wire embedding function for ML model selection using Qwen3 (1024-dim)
+	// This must match the embedding model used during training (Qwen/Qwen3-Embedding-0.6B)
+	selectionFactory = selectionFactory.WithEmbeddingFunc(func(text string) ([]float32, error) {
+		output, err := candle_binding.GetEmbeddingBatched(text, "qwen3", 1024)
+		if err != nil {
+			return nil, err
+		}
+		return output.Embedding, nil
+	})
+	modelSelectorRegistry := selectionFactory.CreateAll()
+
+	// Set as global registry so feedback API can access it
+	selection.GlobalRegistry = modelSelectorRegistry
+
+	logging.Infof("[Router] Initialized model selection registry (per-decision algorithm config)")
+
+	// Auto-enable memory if any decision uses memory plugin
+	memoryEnabled := cfg.Memory.Enabled
+	if !memoryEnabled {
+		for _, decision := range cfg.Decisions {
+			if decision.GetPluginConfig("memory") != nil {
+				memoryEnabled = true
+				logging.Infof("Memory auto-enabled: decision '%s' uses memory plugin", decision.Name)
+				break
+			}
+		}
+	}
+
 	// Create memory store if enabled
 	var memoryStore *memory.MilvusStore
-	if cfg.Memory.Enabled {
+	if memoryEnabled {
 		memStore, err := createMemoryStore(cfg)
 		if err != nil {
 			logging.Warnf("Failed to create memory store: %v, Memory will be disabled", err)
@@ -202,12 +383,14 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		}
 	}
 
-	// Create memory extractor if memory and extraction are enabled
+	// Create memory extractor if memory_extraction external model is configured
 	var memoryExtractor *memory.MemoryExtractor
-	if cfg.Memory.Enabled && cfg.Memory.Extraction.Enabled {
+	if memoryEnabled && cfg.FindExternalModelByRole(config.ModelRoleMemoryExtraction) != nil {
 		if memoryStore != nil {
-			memoryExtractor = memory.NewMemoryExtractorWithStore(&cfg.Memory.Extraction, memoryStore)
-			logging.Infof("Memory extractor enabled with extraction endpoint: %s", cfg.Memory.Extraction.Endpoint)
+			memoryExtractor = memory.NewMemoryExtractorWithStore(cfg, cfg.Memory.ExtractionBatchSize, memoryStore)
+			if memoryExtractor != nil {
+				logging.Infof("Memory extractor enabled with model_role: %s", config.ModelRoleMemoryExtraction)
+			}
 		} else {
 			logging.Warnf("Memory extraction enabled but memory store not available, extraction will be disabled")
 		}
@@ -221,11 +404,223 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		Cache:                semanticCache,
 		ToolsDatabase:        toolsDatabase,
 		ResponseAPIFilter:    responseAPIFilter,
+		ReplayRecorder:       replayRecorder,
+		ModelSelector:        modelSelectorRegistry,
+		ReplayRecorders:      replayRecorders,
 		MemoryStore:          memoryStore,
 		MemoryExtractor:      memoryExtractor,
 	}
 
 	return router, nil
+}
+
+// initializeReplayRecorders creates replay recorders for decisions with router_replay plugin configured.
+// Only decisions with explicit router_replay plugin configuration will have recorders created.
+// System-level settings (store_backend, ttl, etc.) are inherited from global router_replay config.
+func initializeReplayRecorders(cfg *config.RouterConfig) map[string]*routerreplay.Recorder {
+	recorders := make(map[string]*routerreplay.Recorder)
+
+	// Create a recorder only for decisions that have router_replay plugin configured
+	for _, d := range cfg.Decisions {
+		// Check if this decision has router_replay plugin configured
+		pluginCfg := d.GetRouterReplayConfig()
+		if pluginCfg == nil || !pluginCfg.Enabled {
+			// No plugin config or not enabled, skip this decision
+			continue
+		}
+
+		// Create recorder with plugin config (per-decision) and global config (system-level)
+		recorder, err := createReplayRecorder(d.Name, pluginCfg, &cfg.RouterReplay)
+		if err != nil {
+			logging.Errorf("Failed to initialize replay recorder for decision %s: %v", d.Name, err)
+			continue
+		}
+
+		recorders[d.Name] = recorder
+	}
+
+	return recorders
+}
+
+// createReplayRecorder creates a single replay recorder with the appropriate storage backend.
+// pluginCfg contains per-decision settings (max_records, capture settings)
+// globalCfg contains system-level settings (store_backend, ttl, connection configs)
+func createReplayRecorder(decisionName string, pluginCfg *config.RouterReplayPluginConfig, globalCfg *config.RouterReplayConfig) (*routerreplay.Recorder, error) {
+	backend := globalCfg.StoreBackend
+	if backend == "" {
+		backend = "memory"
+	}
+
+	maxBodyBytes := pluginCfg.MaxBodyBytes
+	if maxBodyBytes <= 0 {
+		maxBodyBytes = routerreplay.DefaultMaxBodyBytes
+	}
+
+	var storage store.Storage
+	var err error
+
+	switch backend {
+	case "memory":
+		maxRecords := pluginCfg.MaxRecords
+		if maxRecords <= 0 {
+			maxRecords = routerreplay.DefaultMaxRecords
+		}
+		storage = store.NewMemoryStore(maxRecords, globalCfg.TTLSeconds)
+		logging.Infof("Router replay for %s using memory backend (max_records=%d)", decisionName, maxRecords)
+
+	case "redis":
+		if globalCfg.Redis == nil {
+			return nil, fmt.Errorf("redis config required when store_backend is 'redis'")
+		}
+		// Use decision name as key prefix for Redis isolation
+		keyPrefix := decisionName + ":"
+		if globalCfg.Redis.KeyPrefix != "" {
+			keyPrefix = globalCfg.Redis.KeyPrefix + ":" + decisionName + ":"
+		}
+		redisConfig := &store.RedisConfig{
+			Address:       globalCfg.Redis.Address,
+			DB:            globalCfg.Redis.DB,
+			Password:      globalCfg.Redis.Password,
+			UseTLS:        globalCfg.Redis.UseTLS,
+			TLSSkipVerify: globalCfg.Redis.TLSSkipVerify,
+			MaxRetries:    globalCfg.Redis.MaxRetries,
+			PoolSize:      globalCfg.Redis.PoolSize,
+			KeyPrefix:     keyPrefix,
+		}
+		storage, err = store.NewRedisStore(redisConfig, globalCfg.TTLSeconds, globalCfg.AsyncWrites)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create redis store: %w", err)
+		}
+		logging.Infof("Router replay for %s using redis backend (address=%s, key_prefix=%s, ttl=%ds, async=%v)",
+			decisionName, redisConfig.Address, keyPrefix, globalCfg.TTLSeconds, globalCfg.AsyncWrites)
+
+	case "postgres":
+		if globalCfg.Postgres == nil {
+			return nil, fmt.Errorf("postgres config required when store_backend is 'postgres'")
+		}
+		// Use decision name as table name for PostgreSQL isolation
+		tableName := decisionName + "_replay_records"
+		if globalCfg.Postgres.TableName != "" {
+			tableName = globalCfg.Postgres.TableName + "_" + decisionName
+		}
+		pgConfig := &store.PostgresConfig{
+			Host:            globalCfg.Postgres.Host,
+			Port:            globalCfg.Postgres.Port,
+			Database:        globalCfg.Postgres.Database,
+			User:            globalCfg.Postgres.User,
+			Password:        globalCfg.Postgres.Password,
+			SSLMode:         globalCfg.Postgres.SSLMode,
+			MaxOpenConns:    globalCfg.Postgres.MaxOpenConns,
+			MaxIdleConns:    globalCfg.Postgres.MaxIdleConns,
+			ConnMaxLifetime: globalCfg.Postgres.ConnMaxLifetime,
+			TableName:       tableName,
+		}
+		storage, err = store.NewPostgresStore(pgConfig, globalCfg.TTLSeconds, globalCfg.AsyncWrites)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create postgres store: %w", err)
+		}
+		logging.Infof("Router replay for %s using postgres backend (host=%s, db=%s, table=%s, ttl=%ds, async=%v)",
+			decisionName, pgConfig.Host, pgConfig.Database, pgConfig.TableName, globalCfg.TTLSeconds, globalCfg.AsyncWrites)
+
+	case "milvus":
+		if globalCfg.Milvus == nil {
+			return nil, fmt.Errorf("milvus config required when store_backend is 'milvus'")
+		}
+		// Use decision name as collection name for Milvus isolation
+		collectionName := decisionName + "_replay_records"
+		if globalCfg.Milvus.CollectionName != "" {
+			collectionName = globalCfg.Milvus.CollectionName + "_" + decisionName
+		}
+		milvusConfig := &store.MilvusConfig{
+			Address:          globalCfg.Milvus.Address,
+			Username:         globalCfg.Milvus.Username,
+			Password:         globalCfg.Milvus.Password,
+			CollectionName:   collectionName,
+			ConsistencyLevel: globalCfg.Milvus.ConsistencyLevel,
+			ShardNum:         globalCfg.Milvus.ShardNum,
+		}
+		storage, err = store.NewMilvusStore(milvusConfig, globalCfg.TTLSeconds, globalCfg.AsyncWrites)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create milvus store: %w", err)
+		}
+		logging.Infof("Router replay for %s using milvus backend (address=%s, collection=%s, ttl=%ds, async=%v)",
+			decisionName, milvusConfig.Address, milvusConfig.CollectionName, globalCfg.TTLSeconds, globalCfg.AsyncWrites)
+
+	default:
+		return nil, fmt.Errorf("unknown store_backend: %s (supported: memory, redis, postgres, milvus)", backend)
+	}
+
+	recorder := routerreplay.NewRecorder(storage)
+	recorder.SetCapturePolicy(pluginCfg.CaptureRequestBody, pluginCfg.CaptureResponseBody, maxBodyBytes)
+	return recorder, nil
+}
+
+// handleRouterReplayAPI serves read-only endpoints for router replay records.
+func (r *OpenAIRouter) handleRouterReplayAPI(method string, path string) *ext_proc.ProcessingResponse {
+	// Check if any recorders are initialized
+	hasRecorders := len(r.ReplayRecorders) > 0 || r.ReplayRecorder != nil
+	if !hasRecorders {
+		return nil
+	}
+
+	// Strip query string
+	if idx := strings.Index(path, "?"); idx != -1 {
+		path = path[:idx]
+	}
+
+	base := "/v1/router_replay"
+	if path == base || path == base+"/" {
+		if method != "GET" {
+			return r.createErrorResponse(405, "method not allowed")
+		}
+
+		// Aggregate records from all recorders
+		var allRecords []routerreplay.RoutingRecord
+		for _, recorder := range r.ReplayRecorders {
+			records := recorder.ListAllRecords()
+			allRecords = append(allRecords, records...)
+		}
+
+		// Fallback to legacy single recorder if no multi-recorders
+		if len(allRecords) == 0 && r.ReplayRecorder != nil {
+			allRecords = r.ReplayRecorder.ListAllRecords()
+		}
+
+		payload := map[string]interface{}{
+			"object": "router_replay.list",
+			"count":  len(allRecords),
+			"data":   allRecords,
+		}
+		return r.createJSONResponse(200, payload)
+	}
+
+	if strings.HasPrefix(path, base+"/") {
+		if method != "GET" {
+			return r.createErrorResponse(405, "method not allowed")
+		}
+		replayID := strings.TrimPrefix(path, base+"/")
+		if replayID == "" {
+			return r.createErrorResponse(400, "replay id is required")
+		}
+
+		// Search in all recorders
+		for _, recorder := range r.ReplayRecorders {
+			if rec, ok := recorder.GetRecord(replayID); ok {
+				return r.createJSONResponse(200, rec)
+			}
+		}
+
+		// Fallback to legacy single recorder
+		if r.ReplayRecorder != nil {
+			if rec, ok := r.ReplayRecorder.GetRecord(replayID); ok {
+				return r.createJSONResponse(200, rec)
+			}
+		}
+
+		return r.createErrorResponse(404, "replay record not found")
+	}
+
+	return nil
 }
 
 // createJSONResponseWithBody creates a direct response with pre-marshaled JSON body
@@ -304,27 +699,71 @@ func createResponseStore(cfg *config.RouterConfig) (responsestore.ResponseStore,
 			Database:           cfg.ResponseAPI.Milvus.Database,
 			ResponseCollection: cfg.ResponseAPI.Milvus.Collection,
 		},
+		Redis: responsestore.RedisStoreConfig{
+			Address:          cfg.ResponseAPI.Redis.Address,
+			Password:         cfg.ResponseAPI.Redis.Password,
+			DB:               cfg.ResponseAPI.Redis.DB,
+			KeyPrefix:        cfg.ResponseAPI.Redis.KeyPrefix,
+			ClusterMode:      cfg.ResponseAPI.Redis.ClusterMode,
+			ClusterAddresses: cfg.ResponseAPI.Redis.ClusterAddresses,
+			PoolSize:         cfg.ResponseAPI.Redis.PoolSize,
+			MinIdleConns:     cfg.ResponseAPI.Redis.MinIdleConns,
+			MaxRetries:       cfg.ResponseAPI.Redis.MaxRetries,
+			DialTimeout:      cfg.ResponseAPI.Redis.DialTimeout,
+			ReadTimeout:      cfg.ResponseAPI.Redis.ReadTimeout,
+			WriteTimeout:     cfg.ResponseAPI.Redis.WriteTimeout,
+			TLSEnabled:       cfg.ResponseAPI.Redis.TLSEnabled,
+			TLSCertPath:      cfg.ResponseAPI.Redis.TLSCertPath,
+			TLSKeyPath:       cfg.ResponseAPI.Redis.TLSKeyPath,
+			TLSCAPath:        cfg.ResponseAPI.Redis.TLSCAPath,
+			ConfigPath:       cfg.ResponseAPI.Redis.ConfigPath,
+		},
 	}
+
 	return responsestore.NewStore(storeConfig)
 }
 
 // createMemoryStore creates a memory store based on configuration.
-// For now, it only supports Milvus backend. The Milvus address and collection
-// are expected to be configured in the memory config (or use defaults).
 func createMemoryStore(cfg *config.RouterConfig) (*memory.MilvusStore, error) {
-	// Default Milvus address if not configured
-	// TODO: Add Milvus config to MemoryConfig similar to ResponseAPIConfig
-	milvusAddress := "localhost:19530"
-	collectionName := "agentic_memory"
-
-	// Try to get from ResponseAPI config if available (temporary until MemoryConfig has its own Milvus config)
-	if cfg.ResponseAPI.Milvus.Address != "" {
-		milvusAddress = cfg.ResponseAPI.Milvus.Address
+	milvusAddress := cfg.Memory.Milvus.Address
+	if milvusAddress == "" {
+		milvusAddress = "localhost:19530"
 	}
-	if cfg.ResponseAPI.Milvus.Collection != "" {
-		// Use a different collection name for memory
+
+	collectionName := cfg.Memory.Milvus.Collection
+	if collectionName == "" {
 		collectionName = "agentic_memory"
 	}
+
+	// Auto-detect embedding model from embedding_models configuration
+	// Priority: bert (384-dim, best for memory) > mmbert > qwen3 > gemma
+	embeddingModel := cfg.Memory.EmbeddingModel
+	if embeddingModel == "" {
+		if cfg.EmbeddingModels.BertModelPath != "" {
+			embeddingModel = "bert"
+			logging.Infof("Memory: Auto-selected bert from embedding_models config (384-dim, recommended for memory)")
+		} else if cfg.EmbeddingModels.MmBertModelPath != "" {
+			embeddingModel = "mmbert"
+			logging.Infof("Memory: Auto-selected mmbert from embedding_models config")
+		} else if cfg.EmbeddingModels.Qwen3ModelPath != "" {
+			embeddingModel = "qwen3"
+			logging.Infof("Memory: Auto-selected qwen3 from embedding_models config")
+		} else if cfg.EmbeddingModels.GemmaModelPath != "" {
+			embeddingModel = "gemma"
+			logging.Infof("Memory: Auto-selected gemma from embedding_models config")
+		} else {
+			embeddingModel = "bert"
+			logging.Warnf("Memory: No embedding models configured, bert will be used but may fail without bert_model_path")
+		}
+	}
+
+	embeddingConfig := memory.EmbeddingConfig{
+		Model:     memory.EmbeddingModelType(embeddingModel),
+		Dimension: cfg.Memory.Milvus.Dimension, // Pass dimension from config for Matryoshka models
+	}
+
+	logging.Infof("Memory: Connecting to Milvus at %s, collection=%s", milvusAddress, collectionName)
+	logging.Infof("Memory: Using embedding model=%s", embeddingConfig.Model)
 
 	// Create Milvus client
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -343,22 +782,24 @@ func createMemoryStore(cfg *config.RouterConfig) (*memory.MilvusStore, error) {
 	}
 	if state == nil || !state.IsHealthy {
 		milvusClient.Close()
-		return nil, fmt.Errorf("Milvus connection is not healthy")
+		return nil, fmt.Errorf("milvus connection is not healthy")
 	}
 
-	// Create memory store
+	// Create memory store with unified embedding config
 	store, err := memory.NewMilvusStore(memory.MilvusStoreOptions{
-		Client:         milvusClient,
-		CollectionName: collectionName,
-		Config:         cfg.Memory,
-		Enabled:        cfg.Memory.Enabled,
+		Client:          milvusClient,
+		CollectionName:  collectionName,
+		Config:          cfg.Memory,
+		Enabled:         true, // Always enabled if we reach here (auto-detected or explicit)
+		EmbeddingConfig: &embeddingConfig,
 	})
 	if err != nil {
 		milvusClient.Close()
 		return nil, fmt.Errorf("failed to create memory store: %w", err)
 	}
 
-	logging.Infof("Memory store initialized: address=%s, collection=%s", milvusAddress, collectionName)
+	logging.Infof("Memory store initialized: address=%s, collection=%s, embedding=%s",
+		milvusAddress, collectionName, embeddingConfig.Model)
 	return store, nil
 }
 

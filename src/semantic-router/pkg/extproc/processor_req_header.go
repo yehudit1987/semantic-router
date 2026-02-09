@@ -13,6 +13,7 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/tracing"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/routerreplay"
 )
 
 // EnhancedHallucinationSpan represents a hallucinated span with NLI explanation
@@ -59,13 +60,15 @@ type RequestContext struct {
 	TTFTSeconds  float64
 
 	// VSR decision tracking
-	VSRSelectedCategory     string           // The category from domain classification (MMLU category)
-	VSRSelectedDecisionName string           // The decision name from DecisionEngine evaluation
-	VSRReasoningMode        string           // "on" or "off" - whether reasoning mode was determined to be used
-	VSRSelectedModel        string           // The model selected by VSR
-	VSRCacheHit             bool             // Whether this request hit the cache
-	VSRInjectedSystemPrompt bool             // Whether a system prompt was injected into the request
-	VSRSelectedDecision     *config.Decision // The decision object selected by DecisionEngine (for plugins)
+	VSRSelectedCategory           string           // The category from domain classification (MMLU category)
+	VSRSelectedDecisionName       string           // The decision name from DecisionEngine evaluation
+	VSRSelectedDecisionConfidence float64          // Confidence score from DecisionEngine evaluation
+	VSRReasoningMode              string           // "on" or "off" - whether reasoning mode was determined to be used
+	VSRSelectedModel              string           // The model selected by VSR
+	VSRSelectionMethod            string           // Model selection algorithm used (e.g., "elo", "static", "router_dc")
+	VSRCacheHit                   bool             // Whether this request hit the cache
+	VSRInjectedSystemPrompt       bool             // Whether a system prompt was injected into the request
+	VSRSelectedDecision           *config.Decision // The decision object selected by DecisionEngine (for plugins)
 
 	// VSR signal tracking - stores all matched signals for response headers
 	VSRMatchedKeywords     []string // Matched keyword rule names
@@ -74,6 +77,11 @@ type RequestContext struct {
 	VSRMatchedFactCheck    []string // Matched fact-check signals
 	VSRMatchedUserFeedback []string // Matched user feedback signals
 	VSRMatchedPreference   []string // Matched preference signals
+	VSRMatchedLanguage     []string // Matched language signals
+	VSRMatchedLatency      []string // Matched latency signals
+	VSRMatchedContext      []string // Matched context rule names (e.g. "low_token_count")
+	VSRContextTokenCount   int      // Actual token count for the request
+	VSRMatchedComplexity   []string // Matched complexity rules with difficulty level (e.g. "code_complexity:hard")
 
 	// Endpoint tracking for windowed metrics
 	SelectedEndpoint string // The endpoint address selected for this request
@@ -89,12 +97,46 @@ type RequestContext struct {
 	EnhancedHallucinationInfo *EnhancedHallucinationInfo // Detailed NLI info (when use_nli enabled)
 	UnverifiedFactualResponse bool                       // True if fact-check needed but no tools to verify against
 
+	// Jailbreak Detection Results
+	JailbreakDetected   bool    // True if jailbreak was detected
+	JailbreakType       string  // Type of jailbreak detected
+	JailbreakConfidence float32 // Confidence score of jailbreak detection
+
+	// PII Detection Results
+	PIIDetected bool     // True if PII was detected
+	PIIEntities []string // PII entity types detected (e.g., ["EMAIL", "PHONE_NUMBER"])
+	PIIBlocked  bool     // True if request was blocked due to PII policy violation
+
 	// Tracing context
 	TraceContext context.Context // OpenTelemetry trace context for span propagation
 	UpstreamSpan trace.Span      // Span for tracking upstream vLLM request duration
 
 	// Response API context
 	ResponseAPICtx *ResponseAPIContext // Non-nil if this is a Response API request
+
+	// Router replay context
+	RouterReplayID           string                           // ID of the router replay session, if applicable
+	RouterReplayPluginConfig *config.RouterReplayPluginConfig // Per-decision plugin configuration for router replay
+	RouterReplayRecorder     *routerreplay.Recorder           // The recorder instance for this decision
+
+	// Looper context
+	LooperRequest   bool // True if this request is from looper (internal request, skip plugins)
+	LooperIteration int  // The iteration number if this is a looper request
+
+	// External API routing context (for Envoy-routed external API requests)
+	// APIFormat indicates the target API format (e.g., "anthropic", "gemini")
+	// Empty string means standard OpenAI-compatible backend (no transformation needed)
+	APIFormat string
+
+	// RAG (Retrieval-Augmented Generation) tracking
+	RAGRetrievedContext string  // Retrieved context from RAG plugin
+	RAGBackend          string  // Backend used for retrieval ("milvus", "external_api", "mcp", "hybrid")
+	RAGSimilarityScore  float32 // Best similarity score from retrieval
+	RAGRetrievalLatency float64 // Retrieval latency in seconds
+
+	// Memory retrieval tracking
+	// Stores formatted memory context to be injected after system prompt
+	MemoryContext string // Formatted memory context (empty if no memories retrieved)
 }
 
 // handleRequestHeaders processes the request headers
@@ -137,6 +179,11 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 		if strings.ToLower(h.Key) == headers.RequestID {
 			ctx.RequestID = headerValue
 		}
+		// Check for looper request header
+		if h.Key == headers.VSRLooperRequest && headerValue == "true" {
+			ctx.LooperRequest = true
+			logging.Infof("Detected looper internal request, will skip plugin processing")
+		}
 	}
 
 	// Set request metadata on span
@@ -150,6 +197,10 @@ func (r *OpenAIRouter) handleRequestHeaders(v *ext_proc.ProcessingRequest_Reques
 	tracing.SetSpanAttributes(span,
 		attribute.String(tracing.AttrHTTPMethod, method),
 		attribute.String(tracing.AttrHTTPPath, path))
+	// Router replay API (read-only): list or fetch replay records
+	if replayResp := r.handleRouterReplayAPI(method, path); replayResp != nil {
+		return replayResp, nil
+	}
 
 	// Detect if the client expects a streaming response (SSE)
 	if accept, ok := ctx.Headers["accept"]; ok {

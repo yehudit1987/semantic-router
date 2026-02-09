@@ -118,20 +118,19 @@ type RetrieveOptions struct {
 	// Limit is the maximum number of results to return (default: 5)
 	Limit int
 
-	// Threshold is the minimum similarity score (range 0.0 to 1.0, default: 0.6)
+	// Threshold is the minimum similarity score (range 0.0 to 1.0, default: 0.70)
 	Threshold float32
 }
 
-// DefaultMemoryConfig returns a default memory configuration
-// This is a helper function that returns config.MemoryConfig with defaults
+// DefaultMemoryConfig returns a default memory configuration.
+// EmbeddingModel is intentionally omitted - let router auto-detect from embedding_models config.
 func DefaultMemoryConfig() config.MemoryConfig {
 	return config.MemoryConfig{
-		Embedding: config.MemoryEmbeddingConfig{
-			Model:     "all-MiniLM-L6-v2",
-			Dimension: 384,
+		Milvus: config.MemoryMilvusConfig{
+			Dimension: 384, // Safe default, will be overridden by router
 		},
 		DefaultRetrievalLimit:      5,
-		DefaultSimilarityThreshold: 0.6,
+		DefaultSimilarityThreshold: 0.70,
 	}
 }
 

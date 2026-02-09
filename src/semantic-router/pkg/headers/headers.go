@@ -34,6 +34,10 @@ const (
 	// Example values: "math_decision", "business_decision", "thinking_decision"
 	VSRSelectedDecision = "x-vsr-selected-decision"
 
+	// VSRSelectedConfidence indicates the confidence score of the selected decision.
+	// Value: decimal between 0.0 and 1.0 (e.g., "0.75")
+	VSRSelectedConfidence = "x-vsr-selected-confidence"
+
 	// VSRSelectedReasoning indicates whether reasoning mode was determined to be used.
 	// Values: "on" (reasoning enabled) or "off" (reasoning disabled)
 	VSRSelectedReasoning = "x-vsr-selected-reasoning"
@@ -49,6 +53,10 @@ const (
 	// VSRCacheHit indicates that the response was served from cache.
 	// Value: "true"
 	VSRCacheHit = "x-vsr-cache-hit"
+
+	// RouterReplayID carries the identifier for a captured replay record.
+	// Value: opaque replay token
+	RouterReplayID = "x-vsr-replay-id"
 )
 
 // VSR Signal Tracking Headers
@@ -78,6 +86,27 @@ const (
 	// VSRMatchedPreference contains comma-separated list of matched preference signals.
 	// Example: "creative_writing,technical_analysis"
 	VSRMatchedPreference = "x-vsr-matched-preference"
+
+	// VSRMatchedLanguage contains comma-separated list of matched language signals.
+	// Example: "en,zh,es"
+	VSRMatchedLanguage = "x-vsr-matched-language"
+
+	// VSRMatchedLatency contains comma-separated list of matched latency signals.
+	// Example: "low_latency,medium_latency"
+	VSRMatchedLatency = "x-vsr-matched-latency"
+
+	// VSRMatchedContext contains comma-separated list of matched context rule names.
+	// Example: "low_token_count,high_token_count"
+	VSRMatchedContext = "x-vsr-matched-context"
+
+	// VSRContextTokenCount contains the actual token count for the request.
+	// Example: "1500"
+	//nolint:gosec
+	VSRContextTokenCount = "x-vsr-context-token-count"
+
+	// VSRMatchedComplexity contains comma-separated list of matched complexity rules with difficulty levels.
+	// Example: "code_complexity:hard,math_complexity:easy"
+	VSRMatchedComplexity = "x-vsr-matched-complexity"
 )
 
 // Security Headers
@@ -131,4 +160,43 @@ const (
 	// This header is set alongside UnverifiedFactualResponse to explain why verification couldn't occur.
 	// Value: "true"
 	VerificationContextMissing = "x-vsr-verification-context-missing"
+)
+
+// Looper Request Headers
+// These headers are added to looper internal requests to identify them
+// and allow the extproc to lookup decision configuration and apply plugins.
+const (
+	// VSRLooperRequest indicates this is an internal looper request.
+	// When present, extproc should lookup the decision and execute configured plugins.
+	// Value: "true"
+	VSRLooperRequest = "x-vsr-looper-request"
+
+	// VSRLooperIteration indicates the current iteration number in the looper loop.
+	// Value: "1", "2", "3", etc.
+	VSRLooperIteration = "x-vsr-looper-iteration"
+
+	// VSRLooperDecision indicates the decision name for looper internal requests.
+	// Used by extproc to lookup decision configuration and apply plugins.
+	// Value: decision name (e.g., "remom_low_effort")
+	VSRLooperDecision = "x-vsr-looper-decision"
+)
+
+// Looper Response Headers
+// These headers are added to responses when looper mode is used.
+const (
+	// VSRLooperModel indicates the final model used by the looper.
+	// Value: model name (e.g., "qwen-max")
+	VSRLooperModel = "x-vsr-looper-model"
+
+	// VSRLooperModelsUsed contains the comma-separated list of models that were called.
+	// Value: "qwen-flash,qwen-max" (example)
+	VSRLooperModelsUsed = "x-vsr-looper-models-used"
+
+	// VSRLooperIterations indicates the total number of model calls made.
+	// Value: "2", "3", etc.
+	VSRLooperIterations = "x-vsr-looper-iterations"
+
+	// VSRLooperAlgorithm indicates the algorithm used by the looper.
+	// Value: "confidence", "ratings", "cost-aware"
+	VSRLooperAlgorithm = "x-vsr-looper-algorithm"
 )

@@ -145,43 +145,73 @@ type ConversationMessage struct {
 	Content string `json:"content"`
 }
 
-// getTimeout returns the timeout duration from config
-func getTimeout(cfg *config.QueryRewriteConfig) time.Duration {
-	if cfg.TimeoutSeconds > 0 {
-		return time.Duration(cfg.TimeoutSeconds) * time.Second
+// getMaxTokens returns max tokens from resolved config with default
+func getMaxTokens(resolved *ResolvedLLMConfig, defaultValue int) int {
+	if resolved != nil && resolved.MaxTokens > 0 {
+		return resolved.MaxTokens
 	}
-	return 5 * time.Second // default
+	return defaultValue
 }
 
-// getMaxTokens returns max tokens with default
-func getMaxTokens(cfg *config.QueryRewriteConfig) int {
-	if cfg.MaxTokens > 0 {
-		return cfg.MaxTokens
+// getTemperature returns temperature from resolved config with default
+func getTemperature(resolved *ResolvedLLMConfig, defaultValue float64) float64 {
+	if resolved != nil && resolved.Temperature > 0 {
+		return resolved.Temperature
 	}
-	return 50 // default
+	return defaultValue
 }
 
-// getTemperature returns temperature with default
-func getTemperature(cfg *config.QueryRewriteConfig) float64 {
-	if cfg.Temperature > 0 {
-		return cfg.Temperature
+// getTimeout returns timeout from resolved config (from external_models), or default 5s
+func getTimeout(resolved *ResolvedLLMConfig) time.Duration {
+	if resolved != nil && resolved.TimeoutSeconds > 0 {
+		return time.Duration(resolved.TimeoutSeconds) * time.Second
 	}
-	return 0.1 // default
+	return 5 * time.Second
 }
 
 // queryRewriteSystemPrompt is the system prompt for query rewriting
 const queryRewriteSystemPrompt = `You are a query rewriter for semantic search in a memory database.
 
-Given conversation history and a user query, rewrite the query to be self-contained 
-for searching memories. Include relevant context from history if the query references 
+Given conversation history and a user query, rewrite the query to be self-contained
+for searching memories. Include relevant context from history if the query references
 previous conversation.
 
-Rules:
+CRITICAL RULES:
+- PRESERVE THE QUERY TYPE: If the user is stating a fact, keep it as a statement. If asking a question, keep it as a question. NEVER convert statements to questions!
+- Use ONLY facts explicitly stated in the history. NEVER invent or hallucinate values!
+- If history says "$10,000" - use "$10,000" (not $1,000,000)
 - Keep the rewritten query concise (under 50 words)
 - Preserve the user's intent exactly
-- Include specific entities/topics from history if referenced (e.g., "it", "that", "the second one")
+- Replace vague references (e.g., "it", "that", "my budget") with specific context from history
+- Include CONSTRAINTS when relevant (cannot use X, must use Y, excluded, limitations)
+- For tech/deployment queries, include any mentioned technologies or platforms
 - If the query is already self-contained, return it unchanged
-- Return ONLY the rewritten query, no explanation or quotes`
+- Return ONLY the rewritten query, no explanation or quotes
+
+EXAMPLES:
+History: [user]: My project budget is $50,000 and deadline is March 15th
+Query: When is the deadline?
+Rewritten: When is the deadline for my $50,000 project?
+
+History: [user]: I'm building an e-commerce platform
+Query: I prefer React for frontend and Go for backend
+Rewritten: I prefer React for frontend and Go for backend for my e-commerce platform
+
+History: [user]: I prefer React for frontend and Go for backend
+Query: What tech should I use?
+Rewritten: What tech stack should I use considering my preference for React frontend and Go backend?
+
+History: [user]: We cannot use AWS, must deploy on Azure
+Query: Where can I deploy?
+Rewritten: Where can I deploy my project given I cannot use AWS and must use Azure?
+
+History: [user]: Building an e-commerce platform with PostgreSQL database
+Query: What database?
+Rewritten: What database should I use for my e-commerce platform using PostgreSQL?
+
+History: (no relevant context)
+Query: What is my budget?
+Rewritten: What is my project budget?`
 
 // BuildSearchQuery rewrites a query with conversation context for semantic search.
 // It uses an LLM to understand context and produce a self-contained query.
@@ -191,9 +221,11 @@ Rules:
 //	History: ["Planning vacation to Hawaii"]
 //	Query: "How much?"
 //	Result: "What is the budget for the Hawaii vacation?"
-func BuildSearchQuery(ctx context.Context, history []ConversationMessage, query string, cfg *config.QueryRewriteConfig) (string, error) {
-	if cfg == nil || !cfg.Enabled || cfg.Endpoint == "" {
-		logging.Debugf("Memory: Query rewriting disabled, using original query")
+func BuildSearchQuery(ctx context.Context, history []ConversationMessage, query string, routerCfg *config.RouterConfig) (string, error) {
+	// Query rewriting is enabled if external model with role "memory_rewrite" exists
+	resolved := ResolveQueryRewriteConfig(routerCfg)
+	if resolved == nil || resolved.Endpoint == "" {
+		logging.Debugf("Memory: Query rewriting not configured, using original query")
 		return query, nil
 	}
 
@@ -216,7 +248,7 @@ func BuildSearchQuery(ctx context.Context, history []ConversationMessage, query 
 	logging.Infof("╚══════════════════════════════════════════════════════════════════╝")
 
 	// Call LLM for rewriting
-	rewrittenQuery, err := callLLMForQueryRewrite(ctx, cfg, userPrompt)
+	rewrittenQuery, err := callLLMForQueryRewrite(ctx, resolved, userPrompt)
 	if err != nil {
 		logging.Errorf("Memory: Query rewriting failed, using original: %v", err)
 		// Fallback to original query on error
@@ -290,17 +322,69 @@ type llmChatResponse struct {
 	} `json:"choices"`
 }
 
+// ResolvedLLMConfig holds resolved LLM endpoint configuration from external_models.
+type ResolvedLLMConfig struct {
+	Endpoint       string
+	Model          string
+	TimeoutSeconds int
+	MaxTokens      int
+	Temperature    float64
+}
+
+// ResolveQueryRewriteConfig resolves the LLM endpoint configuration for query rewriting.
+// Looks up the external model by ModelRole (defaults to "memory_rewrite").
+func ResolveQueryRewriteConfig(routerCfg *config.RouterConfig) *ResolvedLLMConfig {
+	if routerCfg == nil {
+		return nil
+	}
+
+	externalCfg := routerCfg.FindExternalModelByRole(config.ModelRoleMemoryRewrite)
+	if externalCfg == nil || externalCfg.ModelEndpoint.Address == "" {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("http://%s:%d", externalCfg.ModelEndpoint.Address, externalCfg.ModelEndpoint.Port)
+	return &ResolvedLLMConfig{
+		Endpoint:       endpoint,
+		Model:          externalCfg.ModelName,
+		TimeoutSeconds: externalCfg.TimeoutSeconds,
+		MaxTokens:      externalCfg.MaxTokens,
+		Temperature:    externalCfg.Temperature,
+	}
+}
+
+// ResolveExtractionConfig resolves the LLM endpoint configuration for memory extraction.
+func ResolveExtractionConfig(routerCfg *config.RouterConfig) *ResolvedLLMConfig {
+	if routerCfg == nil {
+		return nil
+	}
+
+	externalCfg := routerCfg.FindExternalModelByRole(config.ModelRoleMemoryExtraction)
+	if externalCfg == nil || externalCfg.ModelEndpoint.Address == "" {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("http://%s:%d", externalCfg.ModelEndpoint.Address, externalCfg.ModelEndpoint.Port)
+	return &ResolvedLLMConfig{
+		Endpoint:       endpoint,
+		Model:          externalCfg.ModelName,
+		TimeoutSeconds: externalCfg.TimeoutSeconds,
+		MaxTokens:      externalCfg.MaxTokens,
+		Temperature:    externalCfg.Temperature,
+	}
+}
+
 // callLLMForQueryRewrite calls the LLM endpoint for query rewriting
-func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig, userPrompt string) (string, error) {
-	// Build request
+func callLLMForQueryRewrite(ctx context.Context, resolved *ResolvedLLMConfig, userPrompt string) (string, error) {
+	// Build request with defaults: max_tokens=50, temperature=0.1 for query rewriting
 	reqBody := llmChatRequest{
-		Model: cfg.Model,
+		Model: resolved.Model,
 		Messages: []llmChatMessage{
 			{Role: "system", Content: queryRewriteSystemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		MaxTokens:   getMaxTokens(cfg),
-		Temperature: getTemperature(cfg),
+		MaxTokens:   getMaxTokens(resolved, 50),
+		Temperature: getTemperature(resolved, 0.1),
 		Stream:      false,
 	}
 
@@ -309,8 +393,8 @@ func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig,
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Create HTTP request
-	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(cfg.Endpoint, "/"))
+	// Create HTTP request - endpoint should be OpenAI-compatible base URL
+	url := fmt.Sprintf("%s/v1/chat/completions", strings.TrimSuffix(resolved.Endpoint, "/"))
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -318,8 +402,9 @@ func callLLMForQueryRewrite(ctx context.Context, cfg *config.QueryRewriteConfig,
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Send request
-	client := &http.Client{Timeout: getTimeout(cfg)}
+	// Send request with timeout from external_models config
+	timeout := getTimeout(resolved)
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("LLM request failed: %w", err)

@@ -1,8 +1,9 @@
 ---
 translation:
-  source_commit: "a0e504f"
+  source_commit: "81f4f0e"
   source_file: "docs/installation/installation.md"
   outdated: false
+is_mtpe: true
 sidebar_position: 2
 ---
 
@@ -20,42 +21,6 @@ sidebar_position: 2
 
 - **Python**: 3.10 或更高版本
 - **容器运行时**: Docker 或 Podman（运行 Router 容器所需）
-- **可选**: HuggingFace token（仅针对 gated models）
-
-:::tip[容器运行时支持]
-vLLM Semantic Router 同时支持 **Docker** 和 **Podman** 作为容器运行时。CLI 会自动检测系统中可用的运行时。如果两者都已安装，默认优先使用 Docker。您可以通过设置 `CONTAINER_RUNTIME` 环境变量来显式选择运行时：
-
-```bash
-export CONTAINER_RUNTIME=podman  # 使用 Podman
-export CONTAINER_RUNTIME=docker  # 使用 Docker
-```
-
-:::
-
-:::warning[Podman 内存要求]
-如果您使用 Podman，请确保 Podman 机器至少分配了 **8GB 内存**。默认的 2GB 内存不足以加载所需的模型。
-
-配置 Podman 机器内存：
-
-```bash
-# 停止并删除现有机器（如果有）
-podman machine stop
-podman machine rm
-
-# 创建新机器并分配 8GB 内存
-podman machine init --memory 8192 --cpus 4 --disk-size 100
-
-# 启动机器
-podman machine start
-```
-
-您可以通过以下命令验证内存分配：
-
-```bash
-podman machine inspect | grep Memory
-```
-
-:::
 
 ## 快速开始
 
@@ -165,6 +130,12 @@ curl http://localhost:8888/v1/chat/completions \
   }'
 ```
 
+### 6. 启动 Dashboard
+
+```bash
+vllm-sr dashboard
+```
+
 ## 常用命令
 
 ```bash
@@ -206,6 +177,48 @@ vllm-sr serve --image ghcr.io/vllm-project/semantic-router/vllm-sr:latest
 # 控制镜像拉取策略
 vllm-sr serve --image-pull-policy always
 ```
+
+## Kubernetes 部署
+
+在 Kubernetes 或 OpenShift 上进行生产部署时，请使用 **Kubernetes Operator**：
+
+### 使用 Operator 快速开始
+
+```bash
+# 克隆仓库
+git clone https://github.com/vllm-project/semantic-router
+cd semantic-router/deploy/operator
+
+# 安装 CRDs 和 operator
+make install
+make deploy IMG=ghcr.io/vllm-project/semantic-router-operator:latest
+
+# 部署一个 semantic router 实例
+kubectl apply -f config/samples/vllm_v1alpha1_semanticrouter.yaml
+```
+
+**优势：**
+
+- ✅ 使用 Kubernetes CRDs 进行声明式配置
+- ✅ 自动检测平台（OpenShift/Kubernetes）
+- ✅ 内置高可用性和扩展能力
+- ✅ 集成监控和可观测性
+- ✅ 生命周期管理和升级
+
+详情请参阅 **[Kubernetes Operator 指南](k8s/operator)**。
+
+### 其他 Kubernetes 部署选项
+
+- **[Istio 集成](k8s/istio.md)** - 服务网格部署
+- **[AI Gateway](k8s/ai-gateway.md)** - Gateway API 集成
+- **[生产环境堆栈](k8s/production-stack.md)** - 完整的生产环境设置
+- **[Dynamo](k8s/dynamo.md)** - 动态配置管理
+
+## Docker Compose
+
+用于本地开发和测试：
+
+- **[Docker Compose](docker-compose.md)** - 快速本地部署
 
 ## 下一步
 

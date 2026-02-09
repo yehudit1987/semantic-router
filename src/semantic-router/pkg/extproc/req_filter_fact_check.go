@@ -6,52 +6,56 @@ import (
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
-	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
 )
 
-// performFactCheckClassification classifies if the prompt needs fact-checking
-// This should be called during request body processing to determine if hallucination
-// detection should be performed on the response
-func (r *OpenAIRouter) performFactCheckClassification(ctx *RequestContext, userContent string) {
-	// Check if hallucination mitigation is enabled
-	if r.Classifier == nil || !r.Classifier.IsFactCheckEnabled() {
-		logging.Debugf("Fact-check classification skipped: not enabled")
+// setFactCheckFromSignals sets fact-check context fields from signal evaluation results
+// This is called after EvaluateAllSignals to populate ctx.FactCheckNeeded and ctx.FactCheckConfidence
+// Also checks for tools in the request that can provide context for hallucination detection
+// Signal names: "needs_fact_check" or "no_fact_check_needed"
+func (r *OpenAIRouter) setFactCheckFromSignals(ctx *RequestContext, matchedFactCheckRules []string) {
+	// Check if fact-check signal was evaluated
+	if len(matchedFactCheckRules) == 0 {
+		logging.Debugf("No fact-check signals matched")
 		return
 	}
 
-	// Store user content for later use in hallucination detection
-	ctx.UserContent = userContent
-
-	// Perform fact-check classification
-	result, err := r.Classifier.ClassifyFactCheck(userContent)
-	if err != nil {
-		logging.Errorf("Fact-check classification failed: %v", err)
-		metrics.RecordFactCheckClassification("error")
-		return
+	// Check if "needs_fact_check" signal was matched
+	needsFactCheck := false
+	for _, rule := range matchedFactCheckRules {
+		if rule == "needs_fact_check" {
+			needsFactCheck = true
+			break
+		}
 	}
 
-	if result == nil {
-		logging.Debugf("Fact-check classification returned nil result")
-		return
-	}
+	ctx.FactCheckNeeded = needsFactCheck
+	// Note: We don't have the raw confidence score from the signal evaluation
+	// Set a default confidence of 1.0 since the signal already passed the threshold
+	ctx.FactCheckConfidence = 1.0
 
-	ctx.FactCheckNeeded = result.NeedsFactCheck
-	ctx.FactCheckConfidence = result.Confidence
+	// Record metrics - signal match is already recorded in classifier.go
+	// No need to record again here
 
-	// Record metrics
-	if result.NeedsFactCheck {
-		metrics.RecordFactCheckClassification("fact_check_needed")
-	} else {
-		metrics.RecordFactCheckClassification("no_fact_check_needed")
-	}
+	logging.Infof("Fact-check from signals: needs_fact_check=%v, matched_rules=%v",
+		needsFactCheck, matchedFactCheckRules)
 
-	logging.Infof("Fact-check classification: needs_fact_check=%v, confidence=%.3f, label=%s",
-		result.NeedsFactCheck, result.Confidence, result.Label)
+	// Check if request has tools that can provide context for fact-checking
+	// This is done here because tool context is only needed when fact-check signal is evaluated
+	r.checkRequestHasTools(ctx)
 }
 
 // checkRequestHasTools checks if the request body contains tools that could provide
 // context for fact-checking (tool results from previous turns or tool definitions)
 func (r *OpenAIRouter) checkRequestHasTools(ctx *RequestContext) {
+	// Check for RAG-injected context first (NEW)
+	if ctx.RAGRetrievedContext != "" {
+		ctx.HasToolsForFactCheck = true
+		ctx.ToolResultsContext = ctx.RAGRetrievedContext
+		logging.Infof("Using RAG-retrieved context for hallucination detection (%d chars)",
+			len(ctx.RAGRetrievedContext))
+		return
+	}
+
 	if len(ctx.OriginalRequestBody) == 0 {
 		return
 	}
@@ -115,7 +119,6 @@ func extractToolResultsFromMessages(messages []interface{}) []string {
 func (r *OpenAIRouter) shouldPerformHallucinationDetection(ctx *RequestContext) bool {
 	// Must have hallucination detection models available
 	if r.Classifier == nil || !r.Classifier.IsHallucinationDetectionEnabled() {
-		logging.Infof("Skipping hallucination detection: classifier not available or hallucination detection not enabled")
 		return false
 	}
 

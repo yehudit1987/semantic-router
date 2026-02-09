@@ -5,6 +5,8 @@ import (
 	"net"
 	"regexp"
 	"strings"
+
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 )
 
 var (
@@ -122,6 +124,99 @@ func validateConfigStructure(cfg *RouterConfig) error {
 	// Validate vLLM classifier configurations
 	if err := validateVLLMClassifierConfig(&cfg.PromptGuard); err != nil {
 		return err
+	}
+
+	// Validate advanced tool filtering configuration (opt-in)
+	if err := validateAdvancedToolFilteringConfig(cfg); err != nil {
+		return err
+	}
+
+	// Validate latency rules
+	if err := validateLatencyRules(cfg.Signals.LatencyRules); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateLatencyRules validates latency rule configurations
+func validateLatencyRules(rules []LatencyRule) error {
+	for i, rule := range rules {
+		if rule.Name == "" {
+			return fmt.Errorf("latency_rules[%d]: name cannot be empty", i)
+		}
+
+		// At least one of tpot_percentile or ttft_percentile must be set
+		hasTPOTPercentile := rule.TPOTPercentile > 0
+		hasTTFTPercentile := rule.TTFTPercentile > 0
+
+		if !hasTPOTPercentile && !hasTTFTPercentile {
+			return fmt.Errorf("latency_rules[%d] (%s): must specify at least one of tpot_percentile (1-100) or ttft_percentile (1-100). RECOMMENDED: use both for comprehensive latency evaluation", i, rule.Name)
+		}
+
+		// Warn (but don't error) if only one is set - recommend using both
+		if hasTPOTPercentile && !hasTTFTPercentile {
+			logging.Warnf("latency_rules[%d] (%s): only tpot_percentile is set. RECOMMENDED: also set ttft_percentile for comprehensive latency evaluation (user-perceived latency)", i, rule.Name)
+		}
+		if !hasTPOTPercentile && hasTTFTPercentile {
+			logging.Warnf("latency_rules[%d] (%s): only ttft_percentile is set. RECOMMENDED: also set tpot_percentile for comprehensive latency evaluation (token generation throughput)", i, rule.Name)
+		}
+
+		// Validate TPOT percentile if set
+		if hasTPOTPercentile && (rule.TPOTPercentile < 1 || rule.TPOTPercentile > 100) {
+			return fmt.Errorf("latency_rules[%d] (%s): tpot_percentile must be between 1 and 100, got: %d", i, rule.Name, rule.TPOTPercentile)
+		}
+
+		// Validate TTFT percentile if set
+		if hasTTFTPercentile && (rule.TTFTPercentile < 1 || rule.TTFTPercentile > 100) {
+			return fmt.Errorf("latency_rules[%d] (%s): ttft_percentile must be between 1 and 100, got: %d", i, rule.Name, rule.TTFTPercentile)
+		}
+	}
+	return nil
+}
+
+func validateAdvancedToolFilteringConfig(cfg *RouterConfig) error {
+	if cfg == nil || cfg.Tools.AdvancedFiltering == nil {
+		return nil
+	}
+
+	advanced := cfg.Tools.AdvancedFiltering
+	if !advanced.Enabled {
+		return nil
+	}
+
+	if advanced.CandidatePoolSize != nil && *advanced.CandidatePoolSize < 0 {
+		return fmt.Errorf("tools.advanced_filtering.candidate_pool_size must be >= 0")
+	}
+
+	if advanced.MinLexicalOverlap != nil && *advanced.MinLexicalOverlap < 0 {
+		return fmt.Errorf("tools.advanced_filtering.min_lexical_overlap must be >= 0")
+	}
+
+	if advanced.MinCombinedScore != nil &&
+		(*advanced.MinCombinedScore < 0.0 || *advanced.MinCombinedScore > 1.0) {
+		return fmt.Errorf("tools.advanced_filtering.min_combined_score must be between 0.0 and 1.0")
+	}
+
+	if advanced.CategoryConfidenceThreshold != nil &&
+		(*advanced.CategoryConfidenceThreshold < 0.0 || *advanced.CategoryConfidenceThreshold > 1.0) {
+		return fmt.Errorf("tools.advanced_filtering.category_confidence_threshold must be between 0.0 and 1.0")
+	}
+
+	weightFields := []struct {
+		name  string
+		value *float32
+	}{
+		{"embed", advanced.Weights.Embed},
+		{"lexical", advanced.Weights.Lexical},
+		{"tag", advanced.Weights.Tag},
+		{"name", advanced.Weights.Name},
+		{"category", advanced.Weights.Category},
+	}
+	for _, field := range weightFields {
+		if field.value != nil && (*field.value < 0.0 || *field.value > 1.0) {
+			return fmt.Errorf("tools.advanced_filtering.weights.%s must be between 0.0 and 1.0", field.name)
+		}
 	}
 
 	return nil

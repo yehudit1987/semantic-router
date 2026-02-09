@@ -6,10 +6,13 @@ import ViewModal, { ViewSection } from '../components/ViewModal'
 import { DataTable, Column } from '../components/DataTable'
 import TableHeader from '../components/TableHeader'
 import EndpointsEditor, { Endpoint } from '../components/EndpointsEditor'
+import { useReadonly } from '../contexts/ReadonlyContext'
 import {
   ConfigFormat,
   detectConfigFormat,
+  DecisionConditionType
 } from '../types/config'
+import { MCPConfigPanel } from '../components/MCPConfigPanel'
 
 interface VLLMEndpoint {
   name: string
@@ -24,6 +27,7 @@ interface ModelConfig {
   use_modernbert?: boolean
   threshold: number
   use_cpu: boolean
+  use_qwen3?: boolean
   category_mapping_path?: string
   pii_mapping_path?: string
   jailbreak_mapping_path?: string
@@ -160,6 +164,20 @@ interface ConfigData {
     fact_check?: Array<{ name: string; description: string }>
     user_feedbacks?: Array<{ name: string; description: string }>
     preferences?: Array<{ name: string; description: string }>
+    language?: Array<{ name: string }>
+    latency?: Array<{ name: string; tpot_percentile?: number; ttft_percentile?: number; description?: string }>
+    context?: Array<{ name: string; min_tokens: string; max_tokens: string; description?: string }>
+    complexity?: Array<{
+      name: string
+      threshold: number
+      hard: { candidates: string[] }
+      easy: { candidates: string[] }
+      description?: string
+      composer?: {
+        operator: 'AND' | 'OR'
+        conditions: Array<{ type: string; name: string }>
+      }
+    }>
   }
   decisions?: Array<{
     name: string
@@ -214,6 +232,7 @@ interface ConfigData {
     category_model?: ModelConfig
     mcp_category_model?: MCPCategoryModel
     pii_model?: ModelConfig
+    preference_model?: ModelConfig
   }
   categories?: Category[]
   default_reasoning_effort?: string
@@ -232,6 +251,41 @@ interface ConfigPageProps {
   activeSection?: ConfigSection
 }
 
+type SignalType = 'Keywords' | 'Embeddings' | 'Domain' | 'Preference' | 'Fact Check' | 'User Feedback' | 'Language' | 'Latency' | 'Context' | 'Complexity'
+type DecisionConfig = NonNullable<ConfigData['decisions']>[number]
+
+interface DecisionFormState {
+  name: string
+  description: string
+  priority: number
+  operator: 'AND' | 'OR'
+  conditions: { type: string; name: string }[]
+  modelRefs: { model: string; use_reasoning: boolean }[]
+  plugins: { type: string; configuration: string | Record<string, unknown> }[]
+}
+
+interface AddSignalFormState {
+  type: SignalType
+  name: string
+  description: string
+  operator: 'AND' | 'OR'
+  keywords: string
+  case_sensitive: boolean
+  threshold: number
+  candidates: string
+  aggregation_method: string
+  mmlu_categories: string
+  tpot_percentile?: number
+  ttft_percentile?: number
+  min_tokens?: string
+  max_tokens?: string
+  complexity_threshold?: number
+  hard_candidates?: string
+  easy_candidates?: string
+  composer_operator?: 'AND' | 'OR'
+  composer_conditions?: string
+}
+
 // Helper function to format threshold as percentage
 const formatThreshold = (value: number): string => {
   return `${Math.round(value * 100)}%`
@@ -240,6 +294,7 @@ const formatThreshold = (value: number): string => {
 // Removed maskAddress - no longer needed after removing endpoint visibility toggle
 
 const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) => {
+  const { isReadonly } = useReadonly()
   const [config, setConfig] = useState<ConfigData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -352,6 +407,11 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const saveConfig = async (updatedConfig: any) => {
+    // Prevent save in read-only mode
+    if (isReadonly) {
+      throw new Error('Dashboard is in read-only mode. Configuration editing is disabled.')
+    }
+
     try {
       const response = await fetch('/api/router/config/update', {
         method: 'POST',
@@ -410,6 +470,78 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     setEditModalData(null)
     setEditModalFields([])
     setEditModalCallback(null)
+  }
+
+  const listInputToArray = (input: string) => input
+    .split(/[\n,]/)
+    .map(item => item.trim())
+    .filter(Boolean)
+
+  const removeSignalByName = (cfg: ConfigData, type: SignalType, targetName: string) => {
+    // match by type and name to remove the signal from the config
+    if (!cfg.signals) cfg.signals = {}
+
+    switch (type) {
+      case 'Keywords':
+        cfg.signals.keywords = (cfg.signals.keywords || []).filter(s => s.name !== targetName)
+        break
+      case 'Embeddings':
+        cfg.signals.embeddings = (cfg.signals.embeddings || []).filter(s => s.name !== targetName)
+        break
+      case 'Domain':
+        cfg.signals.domains = (cfg.signals.domains || []).filter(s => s.name !== targetName)
+        break
+      case 'Preference':
+        cfg.signals.preferences = (cfg.signals.preferences || []).filter(s => s.name !== targetName)
+        break
+      case 'Fact Check':
+        cfg.signals.fact_check = (cfg.signals.fact_check || []).filter(s => s.name !== targetName)
+        break
+      case 'User Feedback':
+        cfg.signals.user_feedbacks = (cfg.signals.user_feedbacks || []).filter(s => s.name !== targetName)
+        break
+      case 'Language':
+        cfg.signals.language = (cfg.signals.language || []).filter(s => s.name !== targetName)
+        break
+      case 'Latency':
+        cfg.signals.latency = (cfg.signals.latency || []).filter(s => s.name !== targetName)
+        break
+      case 'Context':
+        cfg.signals.context = (cfg.signals.context || []).filter(s => s.name !== targetName)
+        break
+      case 'Complexity':
+        cfg.signals.complexity = (cfg.signals.complexity || []).filter(s => s.name !== targetName)
+        break
+      default:
+        break
+    }
+  }
+
+  const removeDecisionByName = (cfg: ConfigData, targetName: string) => {
+    cfg.decisions = (cfg.decisions || []).filter(d => d.name !== targetName)
+  }
+
+
+  const handleDeleteDecision = async (decision: DecisionConfig) => {
+    if (!confirm(`Are you sure you want to delete decision "${decision.name}"?`)) {
+      return
+    }
+
+    if (!config || !isPythonCLI) {
+      alert('Deleting decisions is only supported for Python CLI configs.')
+      return
+    }
+
+    const newConfig: ConfigData = { ...config }
+    removeDecisionByName(newConfig, decision.name)
+    await saveConfig(newConfig)
+  }
+
+  const handleCloseViewModal = () => {
+    setViewModalOpen(false)
+    setViewModalTitle('')
+    setViewModalSections([])
+    setViewModalEditCallback(null)
   }
 
   // Get effective config value - check router defaults first, then main config
@@ -552,7 +684,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <h3 className={styles.sectionTitle}>PII Detection (ModernBERT)</h3>
-        {routerConfig.classifier?.pii_model && (
+        {routerConfig.classifier?.pii_model && !isReadonly && (
           <button
             className={styles.sectionEditButton}
             onClick={() => {
@@ -653,7 +785,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <h3 className={styles.sectionTitle}>Jailbreak Detection (ModernBERT)</h3>
-        {routerConfig.prompt_guard && (
+        {routerConfig.prompt_guard && !isReadonly && (
           <button
             className={styles.sectionEditButton}
             onClick={() => {
@@ -769,179 +901,182 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
 
   const renderSimilarityBERT = () => {
     return (
-    <div className={styles.section}>
-      <div className={styles.sectionHeader}>
-        <h3 className={styles.sectionTitle}>Similarity BERT Configuration</h3>
-        {routerConfig.bert_model && (
-          <button
-            className={styles.sectionEditButton}
-            onClick={() => {
-              openEditModal(
-                'Edit Similarity BERT Configuration',
-                routerConfig.bert_model || {},
-                [
-                  {
-                    name: 'model_id',
-                    label: 'Model ID',
-                    type: 'text',
-                    required: true,
-                    placeholder: 'e.g., sentence-transformers/all-MiniLM-L6-v2',
-                    description: 'HuggingFace model ID for semantic similarity'
-                  },
-                  {
-                    name: 'threshold',
-                    label: 'Similarity Threshold',
-                    type: 'percentage',
-                    required: true,
-                    placeholder: '80',
-                    description: 'Minimum similarity score for cache hits (0-100%)',
-                    step: 1
-                  },
-                  {
-                    name: 'use_cpu',
-                    label: 'Use CPU',
-                    type: 'boolean',
-                    description: 'Use CPU instead of GPU for inference'
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <h3 className={styles.sectionTitle}>Similarity BERT Configuration</h3>
+          {routerConfig.bert_model && !isReadonly && (
+            <button
+              className={styles.sectionEditButton}
+              onClick={() => {
+                openEditModal(
+                  'Edit Similarity BERT Configuration',
+                  routerConfig.bert_model || {},
+                  [
+                    {
+                      name: 'model_id',
+                      label: 'Model ID',
+                      type: 'text',
+                      required: true,
+                      placeholder: 'e.g., sentence-transformers/all-MiniLM-L6-v2',
+                      description: 'HuggingFace model ID for semantic similarity'
+                    },
+                    {
+                      name: 'threshold',
+                      label: 'Similarity Threshold',
+                      type: 'percentage',
+                      required: true,
+                      placeholder: '80',
+                      description: 'Minimum similarity score for cache hits (0-100%)',
+                      step: 1
+                    },
+                    {
+                      name: 'use_cpu',
+                      label: 'Use CPU',
+                      type: 'boolean',
+                      description: 'Use CPU instead of GPU for inference'
+                    }
+                  ],
+                  async (data) => {
+                    const newConfig = { ...config }
+                    newConfig.bert_model = data
+                    await saveConfig(newConfig)
                   }
-                ],
-                async (data) => {
-                  const newConfig = { ...config }
-                  newConfig.bert_model = data
-                  await saveConfig(newConfig)
-                }
-              )
-            }}
-          >
-            Edit
-          </button>
-        )}
-      </div>
-      <div className={styles.sectionContent}>
-        {routerConfig.bert_model ? (
-          <div className={styles.modelCard}>
-            <div className={styles.modelCardHeader}>
-              <span className={styles.modelCardTitle}>BERT Model (Semantic Similarity)</span>
-              <span className={`${styles.statusBadge} ${styles.statusActive}`}>
-                {routerConfig.bert_model.use_cpu ? 'CPU' : 'GPU'}
-              </span>
-            </div>
-            <div className={styles.modelCardBody}>
-              <div className={styles.configRow}>
-                <span className={styles.configLabel}>Model ID</span>
-                <span className={styles.configValue}>{routerConfig.bert_model.model_id}</span>
-              </div>
-              <div className={styles.configRow}>
-                <span className={styles.configLabel}>Threshold</span>
-                <span className={styles.configValue}>{formatThreshold(routerConfig.bert_model.threshold)}</span>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className={styles.emptyState}>BERT model not configured</div>
-        )}
-
-        {routerConfig.semantic_cache && (
-          <div className={styles.featureCard}>
-            <div className={styles.featureHeader}>
-              <span className={styles.featureTitle}>Semantic Cache</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span className={`${styles.statusBadge} ${routerConfig.semantic_cache?.enabled ? styles.statusActive : styles.statusInactive}`}>
-                  {routerConfig.semantic_cache?.enabled ? '✓ Enabled' : '✗ Disabled'}
+                )
+              }}
+            >
+              Edit
+            </button>
+          )}
+        </div>
+        <div className={styles.sectionContent}>
+          {routerConfig.bert_model ? (
+            <div className={styles.modelCard}>
+              <div className={styles.modelCardHeader}>
+                <span className={styles.modelCardTitle}>BERT Model (Semantic Similarity)</span>
+                <span className={`${styles.statusBadge} ${styles.statusActive}`}>
+                  {routerConfig.bert_model.use_cpu ? 'CPU' : 'GPU'}
                 </span>
-                <button
-                  className={styles.sectionEditButton}
-                  onClick={() => {
-                    openEditModal(
-                      'Edit Semantic Cache Configuration',
-                      config?.semantic_cache || {},
-                      [
-                        {
-                          name: 'enabled',
-                          label: 'Enable Semantic Cache',
-                          type: 'boolean',
-                          description: 'Enable or disable semantic caching'
-                        },
-                        {
-                          name: 'backend_type',
-                          label: 'Backend Type',
-                          type: 'select',
-                          options: ['memory', 'redis', 'memcached'],
-                          description: 'Cache backend storage type'
-                        },
-                        {
-                          name: 'similarity_threshold',
-                          label: 'Similarity Threshold',
-                          type: 'percentage',
-                          required: true,
-                          placeholder: '90',
-                          description: 'Minimum similarity score for cache hits (0-100%)',
-                          step: 1
-                        },
-                        {
-                          name: 'max_entries',
-                          label: 'Max Entries',
-                          type: 'number',
-                          placeholder: '10000',
-                          description: 'Maximum number of cached entries'
-                        },
-                        {
-                          name: 'ttl_seconds',
-                          label: 'TTL (seconds)',
-                          type: 'number',
-                          placeholder: '3600',
-                          description: 'Time-to-live for cached entries'
-                        },
-                        {
-                          name: 'eviction_policy',
-                          label: 'Eviction Policy',
-                          type: 'select',
-                          options: ['lru', 'lfu', 'fifo'],
-                          description: 'Cache eviction policy when max entries reached'
-                        }
-                      ],
-                      async (data) => {
-                        const newConfig = { ...config }
-                        newConfig.semantic_cache = data
-                        await saveConfig(newConfig)
-                      }
-                    )
-                  }}
-                >
-                  Edit
-                </button>
+              </div>
+              <div className={styles.modelCardBody}>
+                <div className={styles.configRow}>
+                  <span className={styles.configLabel}>Model ID</span>
+                  <span className={styles.configValue}>{routerConfig.bert_model.model_id}</span>
+                </div>
+                <div className={styles.configRow}>
+                  <span className={styles.configLabel}>Threshold</span>
+                  <span className={styles.configValue}>{formatThreshold(routerConfig.bert_model.threshold)}</span>
+                </div>
               </div>
             </div>
-            {routerConfig.semantic_cache?.enabled && (
-              <div className={styles.featureBody}>
-                <div className={styles.configRow}>
-                  <span className={styles.configLabel}>Backend Type</span>
-                  <span className={styles.configValue}>{routerConfig.semantic_cache?.backend_type || 'memory'}</span>
+          ) : (
+            <div className={styles.emptyState}>BERT model not configured</div>
+          )}
+
+          {routerConfig.semantic_cache && (
+            <div className={styles.featureCard}>
+              <div className={styles.featureHeader}>
+                <span className={styles.featureTitle}>Semantic Cache</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span className={`${styles.statusBadge} ${routerConfig.semantic_cache?.enabled ? styles.statusActive : styles.statusInactive}`}>
+                    {routerConfig.semantic_cache?.enabled ? '✓ Enabled' : '✗ Disabled'}
+                  </span>
+                  {!isReadonly && (
+                    <button
+                      className={styles.sectionEditButton}
+                      onClick={() => {
+                        openEditModal(
+                          'Edit Semantic Cache Configuration',
+                          config?.semantic_cache || {},
+                          [
+                            {
+                              name: 'enabled',
+                              label: 'Enable Semantic Cache',
+                              type: 'boolean',
+                              description: 'Enable or disable semantic caching'
+                            },
+                            {
+                              name: 'backend_type',
+                              label: 'Backend Type',
+                              type: 'select',
+                              options: ['memory', 'redis', 'memcached'],
+                              description: 'Cache backend storage type'
+                            },
+                            {
+                              name: 'similarity_threshold',
+                              label: 'Similarity Threshold',
+                              type: 'percentage',
+                              required: true,
+                              placeholder: '90',
+                              description: 'Minimum similarity score for cache hits (0-100%)',
+                              step: 1
+                            },
+                            {
+                              name: 'max_entries',
+                              label: 'Max Entries',
+                              type: 'number',
+                              placeholder: '10000',
+                              description: 'Maximum number of cached entries'
+                            },
+                            {
+                              name: 'ttl_seconds',
+                              label: 'TTL (seconds)',
+                              type: 'number',
+                              placeholder: '3600',
+                              description: 'Time-to-live for cached entries'
+                            },
+                            {
+                              name: 'eviction_policy',
+                              label: 'Eviction Policy',
+                              type: 'select',
+                              options: ['lru', 'lfu', 'fifo'],
+                              description: 'Cache eviction policy when max entries reached'
+                            }
+                          ],
+                          async (data) => {
+                            const newConfig = { ...config }
+                            newConfig.semantic_cache = data
+                            await saveConfig(newConfig)
+                          }
+                        )
+                      }}
+                    >
+                      Edit
+                    </button>
+                  )}
                 </div>
-                <div className={styles.configRow}>
-                  <span className={styles.configLabel}>Similarity Threshold</span>
-                  <span className={styles.configValue}>{formatThreshold(routerConfig.semantic_cache?.similarity_threshold)}</span>
-                </div>
-                <div className={styles.configRow}>
-                  <span className={styles.configLabel}>Max Entries</span>
-                  <span className={styles.configValue}>{routerConfig.semantic_cache?.max_entries}</span>
-                </div>
-                <div className={styles.configRow}>
-                  <span className={styles.configLabel}>TTL</span>
-                  <span className={styles.configValue}>{routerConfig.semantic_cache?.ttl_seconds}s</span>
-                </div>
-                {routerConfig.semantic_cache?.eviction_policy && (
-                  <div className={styles.configRow}>
-                    <span className={styles.configLabel}>Eviction Policy</span>
-                    <span className={styles.configValue}>{routerConfig.semantic_cache.eviction_policy}</span>
-                  </div>
-                )}
               </div>
-            )}
-          </div>
-        )}
+              {routerConfig.semantic_cache?.enabled && (
+                <div className={styles.featureBody}>
+                  <div className={styles.configRow}>
+                    <span className={styles.configLabel}>Backend Type</span>
+                    <span className={styles.configValue}>{routerConfig.semantic_cache?.backend_type || 'memory'}</span>
+                  </div>
+                  <div className={styles.configRow}>
+                    <span className={styles.configLabel}>Similarity Threshold</span>
+                    <span className={styles.configValue}>{formatThreshold(routerConfig.semantic_cache?.similarity_threshold)}</span>
+                  </div>
+                  <div className={styles.configRow}>
+                    <span className={styles.configLabel}>Max Entries</span>
+                    <span className={styles.configValue}>{routerConfig.semantic_cache?.max_entries}</span>
+                  </div>
+                  <div className={styles.configRow}>
+                    <span className={styles.configLabel}>TTL</span>
+                    <span className={styles.configValue}>{routerConfig.semantic_cache?.ttl_seconds}s</span>
+                  </div>
+                  {routerConfig.semantic_cache?.eviction_policy && (
+                    <div className={styles.configRow}>
+                      <span className={styles.configLabel}>Eviction Policy</span>
+                      <span className={styles.configValue}>{routerConfig.semantic_cache.eviction_policy}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-  )}
+    )
+  }
 
   // ============================================================================
   // 4. INTELLIGENT ROUTING SECTION
@@ -966,61 +1101,63 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
                   <span className={`${styles.statusBadge} ${styles.statusActive}`}>
                     {routerConfig.classifier.category_model.use_cpu ? 'CPU' : 'GPU'}
                   </span>
-                  <button
-                    className={styles.editButton}
-                    onClick={() => {
-                      openEditModal(
-                        'Edit In-tree Category Classifier',
-                        routerConfig.classifier?.category_model || {},
-                        [
-                          {
-                            name: 'model_id',
-                            label: 'Model ID',
-                            type: 'text',
-                            required: true,
-                            placeholder: 'e.g., answerdotai/ModernBERT-base',
-                            description: 'HuggingFace model ID for category classification'
-                          },
-                          {
-                            name: 'threshold',
-                            label: 'Classification Threshold',
-                            type: 'percentage',
-                            required: true,
-                            placeholder: '70',
-                            description: 'Confidence threshold for category classification (0-100%)',
-                            step: 1
-                          },
-                          {
-                            name: 'use_cpu',
-                            label: 'Use CPU',
-                            type: 'boolean',
-                            description: 'Use CPU instead of GPU for inference'
-                          },
-                          {
-                            name: 'use_modernbert',
-                            label: 'Use ModernBERT',
-                            type: 'boolean',
-                            description: 'Enable ModernBERT-based classification'
-                          },
-                          {
-                            name: 'category_mapping_path',
-                            label: 'Category Mapping Path',
-                            type: 'text',
-                            placeholder: 'config/category_mapping.json',
-                            description: 'Path to category mapping configuration'
+                  {!isReadonly && (
+                    <button
+                      className={styles.editButton}
+                      onClick={() => {
+                        openEditModal(
+                          'Edit In-tree Category Classifier',
+                          routerConfig.classifier?.category_model || {},
+                          [
+                            {
+                              name: 'model_id',
+                              label: 'Model ID',
+                              type: 'text',
+                              required: true,
+                              placeholder: 'e.g., answerdotai/ModernBERT-base',
+                              description: 'HuggingFace model ID for category classification'
+                            },
+                            {
+                              name: 'threshold',
+                              label: 'Classification Threshold',
+                              type: 'percentage',
+                              required: true,
+                              placeholder: '70',
+                              description: 'Confidence threshold for category classification (0-100%)',
+                              step: 1
+                            },
+                            {
+                              name: 'use_cpu',
+                              label: 'Use CPU',
+                              type: 'boolean',
+                              description: 'Use CPU instead of GPU for inference'
+                            },
+                            {
+                              name: 'use_modernbert',
+                              label: 'Use ModernBERT',
+                              type: 'boolean',
+                              description: 'Enable ModernBERT-based classification'
+                            },
+                            {
+                              name: 'category_mapping_path',
+                              label: 'Category Mapping Path',
+                              type: 'text',
+                              placeholder: 'config/category_mapping.json',
+                              description: 'Path to category mapping configuration'
+                            }
+                          ],
+                          async (data) => {
+                            const newConfig = { ...config }
+                            if (!newConfig.classifier) newConfig.classifier = {}
+                            newConfig.classifier.category_model = data
+                            await saveConfig(newConfig)
                           }
-                        ],
-                        async (data) => {
-                          const newConfig = { ...config }
-                          if (!newConfig.classifier) newConfig.classifier = {}
-                          newConfig.classifier.category_model = data
-                          await saveConfig(newConfig)
-                        }
-                      )
-                    }}
-                  >
-                    
-                  </button>
+                        )
+                      }}
+                    >
+
+                    </button>
+                  )}
                 </div>
               </div>
               <div className={styles.modelCardBody}>
@@ -1059,90 +1196,92 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
                 <span className={styles.modelCardTitle}>Out-tree Category Classifier (MCP)</span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                   <span className={`${styles.statusBadge} ${styles.statusActive}`}>✓ Enabled</span>
-                  <button
-                    className={styles.editButton}
-                    onClick={() => {
-                      openEditModal(
-                        'Edit Out-tree MCP Category Classifier',
-                        routerConfig.classifier?.mcp_category_model || {},
-                        [
-                          {
-                            name: 'enabled',
-                            label: 'Enable MCP Classifier',
-                            type: 'boolean',
-                            description: 'Enable or disable MCP-based classification'
-                          },
-                          {
-                            name: 'transport_type',
-                            label: 'Transport Type',
-                            type: 'select',
-                            options: ['stdio', 'http'],
-                            required: true,
-                            description: 'MCP transport protocol type'
-                          },
-                          {
-                            name: 'command',
-                            label: 'Command',
-                            type: 'text',
-                            placeholder: 'e.g., python mcp_server.py',
-                            description: 'Command to start MCP server (for stdio transport)'
-                          },
-                          {
-                            name: 'args',
-                            label: 'Arguments (JSON)',
-                            type: 'json',
-                            placeholder: '["--port", "8080"]',
-                            description: 'Command line arguments as JSON array'
-                          },
-                          {
-                            name: 'env',
-                            label: 'Environment Variables (JSON)',
-                            type: 'json',
-                            placeholder: '{"API_KEY": "xxx"}',
-                            description: 'Environment variables as JSON object'
-                          },
-                          {
-                            name: 'url',
-                            label: 'URL',
-                            type: 'text',
-                            placeholder: 'http://localhost:8080',
-                            description: 'MCP server URL (for http transport)'
-                          },
-                          {
-                            name: 'tool_name',
-                            label: 'Tool Name',
-                            type: 'text',
-                            placeholder: 'classify_category',
-                            description: 'Name of the MCP tool to call'
-                          },
-                          {
-                            name: 'threshold',
-                            label: 'Classification Threshold',
-                            type: 'percentage',
-                            required: true,
-                            placeholder: '70',
-                            description: 'Confidence threshold for classification (0-100%)',
-                            step: 1
-                          },
-                          {
-                            name: 'timeout_seconds',
-                            label: 'Timeout (seconds)',
-                            type: 'number',
-                            placeholder: '30',
-                            description: 'Request timeout in seconds'
+                  {!isReadonly && (
+                    <button
+                      className={styles.editButton}
+                      onClick={() => {
+                        openEditModal(
+                          'Edit Out-tree MCP Category Classifier',
+                          routerConfig.classifier?.mcp_category_model || {},
+                          [
+                            {
+                              name: 'enabled',
+                              label: 'Enable MCP Classifier',
+                              type: 'boolean',
+                              description: 'Enable or disable MCP-based classification'
+                            },
+                            {
+                              name: 'transport_type',
+                              label: 'Transport Type',
+                              type: 'select',
+                              options: ['stdio', 'http'],
+                              required: true,
+                              description: 'MCP transport protocol type'
+                            },
+                            {
+                              name: 'command',
+                              label: 'Command',
+                              type: 'text',
+                              placeholder: 'e.g., python mcp_server.py',
+                              description: 'Command to start MCP server (for stdio transport)'
+                            },
+                            {
+                              name: 'args',
+                              label: 'Arguments (JSON)',
+                              type: 'json',
+                              placeholder: '["--port", "8080"]',
+                              description: 'Command line arguments as JSON array'
+                            },
+                            {
+                              name: 'env',
+                              label: 'Environment Variables (JSON)',
+                              type: 'json',
+                              placeholder: '{"API_KEY": "xxx"}',
+                              description: 'Environment variables as JSON object'
+                            },
+                            {
+                              name: 'url',
+                              label: 'URL',
+                              type: 'text',
+                              placeholder: 'http://localhost:8080',
+                              description: 'MCP server URL (for http transport)'
+                            },
+                            {
+                              name: 'tool_name',
+                              label: 'Tool Name',
+                              type: 'text',
+                              placeholder: 'classify_category',
+                              description: 'Name of the MCP tool to call'
+                            },
+                            {
+                              name: 'threshold',
+                              label: 'Classification Threshold',
+                              type: 'percentage',
+                              required: true,
+                              placeholder: '70',
+                              description: 'Confidence threshold for classification (0-100%)',
+                              step: 1
+                            },
+                            {
+                              name: 'timeout_seconds',
+                              label: 'Timeout (seconds)',
+                              type: 'number',
+                              placeholder: '30',
+                              description: 'Request timeout in seconds'
+                            }
+                          ],
+                          async (data) => {
+                            const newConfig = { ...config }
+                            if (!newConfig.classifier) newConfig.classifier = {}
+                            newConfig.classifier.mcp_category_model = data
+                            await saveConfig(newConfig)
                           }
-                        ],
-                        async (data) => {
-                          const newConfig = { ...config }
-                          if (!newConfig.classifier) newConfig.classifier = {}
-                          newConfig.classifier.mcp_category_model = data
-                          await saveConfig(newConfig)
-                        }
-                      )
-                    }}
-                  >
-                    
-                  </button>
+                        )
+                      }}
+                    >
+
+                    </button>
+                  )}
                 </div>
               </div>
               <div className={styles.modelCardBody}>
@@ -1194,6 +1333,105 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     )
   }
 
+  // ============================================================================
+  // 4b. PREFERENCE MODEL SECTION (LOCAL CANDLE)
+  // ============================================================================
+
+  const renderPreferenceModel = () => {
+    const preferenceModel = routerConfig.classifier?.preference_model
+
+    return (
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <h3 className={styles.sectionTitle}>Preference Model (Work In Progress)</h3>
+          <button
+            className={styles.sectionEditButton}
+            onClick={() => {
+              openEditModal(
+                preferenceModel ? 'Edit Preference Model' : 'Add Preference Model',
+                preferenceModel || {
+                  model_id: '',
+                  threshold: 0,
+                  use_cpu: false,
+                  use_qwen3: true,
+                },
+                [
+                  {
+                    name: 'model_id',
+                    label: 'Model ID or Path',
+                    type: 'text',
+                    required: true,
+                    placeholder: '',
+                    description: 'Local Candle model path or HuggingFace ID for preference routing',
+                  },
+                  {
+                    name: 'threshold',
+                    label: 'Confidence Threshold',
+                    type: 'percentage',
+                    placeholder: '0',
+                    description: 'Minimum confidence to accept a preference (0-100%, optional)',
+                    step: 1,
+                  },
+                  {
+                    name: 'use_cpu',
+                    label: 'Use CPU',
+                    type: 'boolean',
+                    description: 'Force CPU inference instead of GPU/Metal when available',
+                  },
+                  {
+                    name: 'use_qwen3',
+                    label: 'Use Qwen3 Model',
+                    type: 'boolean',
+                    description: 'Enable Qwen3 zero-shot/fine-tuned preference classifier',
+                  },
+                ],
+                async (data) => {
+                  const newConfig = { ...config }
+                  if (!newConfig.classifier) newConfig.classifier = {}
+                  newConfig.classifier.preference_model = data
+                  await saveConfig(newConfig)
+                },
+                preferenceModel ? 'edit' : 'add'
+              )
+            }}
+          >
+            {preferenceModel ? 'Edit' : 'Add'}
+          </button>
+        </div>
+        <div className={styles.sectionContent}>
+          {preferenceModel ? (
+            <div className={styles.modelCard}>
+              <div className={styles.modelCardHeader}>
+                <span className={styles.modelCardTitle}>Local Preference Classifier</span>
+                <span className={`${styles.statusBadge} ${styles.statusActive}`}>
+                  {preferenceModel.use_cpu ? 'CPU' : 'GPU'}
+                </span>
+              </div>
+              <div className={styles.modelCardBody}>
+                <div className={styles.configRow}>
+                  <span className={styles.configLabel}>Model ID</span>
+                  <span className={styles.configValue}>{preferenceModel.model_id}</span>
+                </div>
+                <div className={styles.configRow}>
+                  <span className={styles.configLabel}>Threshold</span>
+                  <span className={styles.configValue}>{formatThreshold(preferenceModel.threshold || 0)}</span>
+                </div>
+                <div className={styles.configRow}>
+                  <span className={styles.configLabel}>Qwen3</span>
+                  <span className={`${styles.statusBadge} ${preferenceModel.use_qwen3 ? styles.statusActive : styles.statusInactive}`}>
+                    {preferenceModel.use_qwen3 ? '✓ Enabled' : '✗ Disabled'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className={styles.emptyState}>Preference model not configured</div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   const renderCategories = () => {
     // Get domains/categories from both formats
     const domains = getDomains()
@@ -1201,362 +1439,374 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     const defaultModel = getDefaultModel()
 
     return (
-    <div className={styles.section}>
-      <div className={styles.sectionHeader}>
-        <h3 className={styles.sectionTitle}>{isPythonCLI ? 'Domains & Decisions' : 'Categories Configuration'}</h3>
-        <span className={styles.badge}>{domains.length} {isPythonCLI ? 'domains' : 'categories'}</span>
-      </div>
-      <div className={styles.sectionContent}>
-        {/* Core Settings at the top */}
-        <div className={styles.coreSettingsInline}>
-          <div className={styles.inlineConfigRow}>
-            <span className={styles.inlineConfigLabel}>Default Model:</span>
-            <span className={styles.inlineConfigValue}>{defaultModel || 'N/A'}</span>
-          </div>
-          {!isPythonCLI && (
-          <div className={styles.inlineConfigRow}>
-            <span className={styles.inlineConfigLabel}>Default Reasoning Effort:</span>
-            <span className={`${styles.badge} ${styles[`badge${config?.default_reasoning_effort || 'medium'}`]}`}>
-              {config?.default_reasoning_effort || 'medium'}
-            </span>
-          </div>
-          )}
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <h3 className={styles.sectionTitle}>{isPythonCLI ? 'Domains & Decisions' : 'Categories Configuration'}</h3>
+          <span className={styles.badge}>{domains.length} {isPythonCLI ? 'domains' : 'categories'}</span>
         </div>
-
-        {/* Python CLI format - show domains and decisions separately */}
-        {isPythonCLI ? (
-          <>
-            {/* Domains Section */}
-            <h4 className={styles.subsectionTitle}>Domains</h4>
-            {domains.length > 0 ? (
-              <div className={styles.categoryGridTwoColumn}>
-                {domains.map((domain, index) => (
-                  <div key={index} className={styles.categoryCard}>
-                    <div className={styles.categoryHeader}>
-                      <span className={styles.categoryName}>{domain.name}</span>
-                      <button
-                        className={styles.editButton}
-                        onClick={() => {
-                          openEditModal(
-                            `Edit Domain: ${domain.name}`,
-                            { description: domain.description || '' },
-                            [
-                              {
-                                name: 'description',
-                                label: 'Description',
-                                type: 'textarea',
-                                placeholder: 'Describe this domain...',
-                                description: 'What types of queries belong to this domain'
-                              }
-                            ],
-                            async (data) => {
-                              const newConfig = { ...config }
-                              if (newConfig.signals?.domains) {
-                                newConfig.signals.domains[index] = {
-                                  ...domain,
-                                  description: data.description,
-                                }
-                              }
-                              await saveConfig(newConfig)
-                            }
-                          )
-                        }}
-                      >
-                        
-                      </button>
-                    </div>
-                    {domain.description && (
-                      <p className={styles.categoryDescription}>{domain.description}</p>
-                    )}
-                    {domain.mmlu_categories && domain.mmlu_categories.length > 0 && (
-                      <div className={styles.tagsContainer}>
-                        {domain.mmlu_categories.map((cat: string, idx: number) => (
-                          <span key={idx} className={styles.tag}>{cat}</span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+        <div className={styles.sectionContent}>
+          {/* Core Settings at the top */}
+          <div className={styles.coreSettingsInline}>
+            <div className={styles.inlineConfigRow}>
+              <span className={styles.inlineConfigLabel}>Default Model:</span>
+              <span className={styles.inlineConfigValue}>{defaultModel || 'N/A'}</span>
+            </div>
+            {!isPythonCLI && (
+              <div className={styles.inlineConfigRow}>
+                <span className={styles.inlineConfigLabel}>Default Reasoning Effort:</span>
+                <span className={`${styles.badge} ${styles[`badge${config?.default_reasoning_effort || 'medium'}`]}`}>
+                  {config?.default_reasoning_effort || 'medium'}
+                </span>
               </div>
-            ) : (
-              <div className={styles.emptyState}>No domains configured</div>
             )}
+          </div>
 
-            {/* Decisions Section */}
-            <h4 className={styles.subsectionTitle}>Decisions (Routing Rules)</h4>
-            {decisions.length > 0 ? (
-              <div className={styles.categoryGridTwoColumn}>
-                {decisions.map((decision, index) => (
-                  <div key={index} className={styles.categoryCard}>
-                    <div className={styles.categoryHeader}>
-                      <span className={styles.categoryName}>{decision.name}</span>
-                      <span className={`${styles.badge} ${styles.badgeInfo}`}>Priority: {decision.priority}</span>
-                    </div>
-                    {decision.description && (
-                      <p className={styles.categoryDescription}>{decision.description}</p>
-                    )}
-                    {decision.rules && (
-                      <div className={styles.configRow}>
-                        <span className={styles.configLabel}>Rules</span>
-                        <span className={styles.configValue}>
-                          {decision.rules.conditions?.length || 0} conditions ({decision.rules.operator})
-                        </span>
-                      </div>
-                    )}
-                    {decision.modelRefs && decision.modelRefs.length > 0 && (
-                      <div className={styles.configRow}>
-                        <span className={styles.configLabel}>Models</span>
-                        <div className={styles.endpointTags}>
-                          {decision.modelRefs.map((ref: { model: string; use_reasoning?: boolean }, idx: number) => (
-                            <span key={idx} className={styles.endpointTag}>
-                              {ref.model} {ref.use_reasoning && ''}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className={styles.emptyState}>No decisions configured</div>
-            )}
-          </>
-        ) : (
-          /* Legacy format - categories with model scores */
-          config?.categories && config.categories.length > 0 ? (
-          <div className={styles.categoryGridTwoColumn}>
-            {config.categories.map((category, index) => {
-              // Normalize model_scores (handles both object and array formats)
-              const normalizedScores = normalizeModelScores(category.model_scores)
-              // Get reasoning info from best model (first model score)
-              const bestModel = normalizedScores[0]
-              const useReasoning = bestModel?.use_reasoning || false
-              const reasoningEffort = bestModel?.reasoning_effort || 'medium'
-              const reasoningDescription = bestModel?.reasoning_description || ''
-
-              return (
-              <div key={index} className={styles.categoryCard}>
-                <div className={styles.categoryHeader}>
-                  <span className={styles.categoryName}>{category.name}</span>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    {useReasoning && (
-                      <span className={`${styles.reasoningBadge} ${styles[`reasoning${reasoningEffort}`]}`}>
-                        {reasoningEffort}
-                      </span>
-                    )}
-                    <button
-                      className={styles.editButton}
-                      onClick={() => {
-                        openEditModal(
-                          `Edit Category: ${category.name}`,
-                          {
-                            system_prompt: category.system_prompt || ''
-                          },
-                          [
-                            {
-                              name: 'system_prompt',
-                              label: 'System Prompt',
-                              type: 'textarea',
-                              placeholder: 'Enter system prompt for this category...',
-                              description: 'Instructions for the model when handling this category'
-                            }
-                          ],
-                          async (data) => {
-                            const newConfig = { ...config }
-                            if (newConfig.categories) {
-                              newConfig.categories[index] = {
-                                ...category,
-                                ...data
-                              }
-                            }
-                            await saveConfig(newConfig)
-                          }
-                        )
-                      }}
-                    >
-                      
-                    </button>
-                  </div>
-                </div>
-
-                {/* System Prompt */}
-                {category.system_prompt && (
-                  <div className={styles.systemPromptSection}>
-                    <div className={styles.systemPromptLabel}>System Prompt</div>
-                    <div className={styles.systemPromptText}>{category.system_prompt}</div>
-                  </div>
-                )}
-
-                {reasoningDescription && (
-                  <p className={styles.categoryDescription}>{reasoningDescription}</p>
-                )}
-
-                <div className={styles.categoryModels}>
-                  <div className={styles.categoryModelsHeader}>
-                    <span>Model Scores</span>
-                    <button
-                      className={styles.addModelButton}
-                      onClick={() => {
-                        // Get available models from model_config
-                        const availableModels = config?.model_config
-                          ? Object.keys(config.model_config)
-                          : []
-
-                        openEditModal(
-                          `Add Model to ${category.name}`,
-                          {
-                            model: availableModels[0] || '',
-                            score: 0.5,
-                            use_reasoning: false
-                          },
-                          [
-                            {
-                              name: 'model',
-                              label: 'Model',
-                              type: 'select',
-                              options: availableModels,
-                              required: true,
-                              description: 'Select from configured models'
-                            },
-                            {
-                              name: 'score',
-                              label: 'Score',
-                              type: 'number',
-                              required: true,
-                              placeholder: '0.5',
-                              description: 'Model score (0-1)'
-                            },
-                            {
-                              name: 'use_reasoning',
-                              label: 'Use Reasoning',
-                              type: 'boolean',
-                              description: 'Enable reasoning for this model in this category'
-                            }
-                          ],
-                          async (data) => {
-                            const newConfig = { ...config }
-                            if (newConfig.categories) {
-                              const updatedCategory = { ...category }
-                              // Convert to array format if needed (Legacy uses object)
-                              const scores = normalizeModelScores(updatedCategory.model_scores)
-                              scores.push(data)
-                              updatedCategory.model_scores = scores
-                              newConfig.categories[index] = updatedCategory
-                            }
-                            await saveConfig(newConfig)
-                          },
-                          'add'
-                        )
-                      }}
-                    >
-                      
-                    </button>
-                  </div>
-                  {normalizedScores.length > 0 ? (
-                    normalizedScores.map((modelScore, modelIdx) => (
-                      <div key={modelIdx} className={styles.modelScoreRow}>
-                        <span className={styles.modelScoreName}>
-                          {modelScore.model}
-                          {modelScore.use_reasoning && <span className={styles.reasoningIcon}></span>}
-                        </span>
-                        <div className={styles.scoreBar}>
-                          <div
-                            className={styles.scoreBarFill}
-                            style={{ width: `${(modelScore.score ?? 0) * 100}%` }}
-                          ></div>
-                          <span className={styles.scoreText}>{((modelScore.score ?? 0) * 100).toFixed(0)}%</span>
-                        </div>
-                        <div className={styles.modelScoreActions}>
+          {/* Python CLI format - show domains and decisions separately */}
+          {isPythonCLI ? (
+            <>
+              {/* Domains Section */}
+              <h4 className={styles.subsectionTitle}>Domains</h4>
+              {domains.length > 0 ? (
+                <div className={styles.categoryGridTwoColumn}>
+                  {domains.map((domain, index) => (
+                    <div key={index} className={styles.categoryCard}>
+                      <div className={styles.categoryHeader}>
+                        <span className={styles.categoryName}>{domain.name}</span>
+                        {!isReadonly && (
                           <button
                             className={styles.editButton}
                             onClick={() => {
-                              // Get available models from model_config
-                              const availableModels = config?.model_config
-                                ? Object.keys(config.model_config)
-                                : []
-
                               openEditModal(
-                                `Edit Model: ${modelScore.model}`,
-                                { ...modelScore },
+                                `Edit Domain: ${domain.name}`,
+                                { description: domain.description || '' },
                                 [
                                   {
-                                    name: 'model',
-                                    label: 'Model',
-                                    type: 'select',
-                                    options: availableModels,
-                                    required: true,
-                                    description: 'Select from configured models'
-                                  },
-                                  {
-                                    name: 'score',
-                                    label: 'Score',
-                                    type: 'number',
-                                    required: true,
-                                    placeholder: '0.5',
-                                    description: 'Model score (0-1)'
-                                  },
-                                  {
-                                    name: 'use_reasoning',
-                                    label: 'Use Reasoning',
-                                    type: 'boolean',
-                                    description: 'Enable reasoning for this model in this category'
+                                    name: 'description',
+                                    label: 'Description',
+                                    type: 'textarea',
+                                    placeholder: 'Describe this domain...',
+                                    description: 'What types of queries belong to this domain'
                                   }
                                 ],
                                 async (data) => {
-                                  // For legacy object format, we need to convert back
                                   const newConfig = { ...config }
-                                  if (newConfig.categories) {
-                                    const updatedCategory = { ...category }
-                                    // Convert to array format for consistency
-                                    const scores = normalizeModelScores(updatedCategory.model_scores)
-                                    scores[modelIdx] = data
-                                    updatedCategory.model_scores = scores
-                                    newConfig.categories[index] = updatedCategory
+                                  if (newConfig.signals?.domains) {
+                                    newConfig.signals.domains[index] = {
+                                      ...domain,
+                                      description: data.description,
+                                    }
                                   }
                                   await saveConfig(newConfig)
                                 }
                               )
                             }}
                           >
-                            
+
                           </button>
-                          <button
-                            className={styles.deleteButton}
-                            onClick={() => {
-                              if (confirm(`Remove model "${modelScore.model}" from this category?`)) {
-                                const newConfig = { ...config }
-                                if (newConfig.categories) {
-                                  const updatedCategory = { ...category }
-                                  // Convert to array format for consistency
-                                  const scores = normalizeModelScores(updatedCategory.model_scores)
-                                  scores.splice(modelIdx, 1)
-                                  updatedCategory.model_scores = scores
-                                  newConfig.categories[index] = updatedCategory
-                                }
-                                saveConfig(newConfig)
-                              }
-                            }}
-                          >
-                            
-                          </button>
+                        )}
+                      </div>
+                      {domain.description && (
+                        <p className={styles.categoryDescription}>{domain.description}</p>
+                      )}
+                      {domain.mmlu_categories && domain.mmlu_categories.length > 0 && (
+                        <div className={styles.tagsContainer}>
+                          {domain.mmlu_categories.map((cat: string, idx: number) => (
+                            <span key={idx} className={styles.tag}>{cat}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.emptyState}>No domains configured</div>
+              )}
+
+              {/* Decisions Section */}
+              <h4 className={styles.subsectionTitle}>Decisions (Routing Rules)</h4>
+              {decisions.length > 0 ? (
+                <div className={styles.categoryGridTwoColumn}>
+                  {decisions.map((decision, index) => (
+                    <div key={index} className={styles.categoryCard}>
+                      <div className={styles.categoryHeader}>
+                        <span className={styles.categoryName}>{decision.name}</span>
+                        <span className={`${styles.badge} ${styles.badgeInfo}`}>Priority: {decision.priority}</span>
+                      </div>
+                      {decision.description && (
+                        <p className={styles.categoryDescription}>{decision.description}</p>
+                      )}
+                      {decision.rules && (
+                        <div className={styles.configRow}>
+                          <span className={styles.configLabel}>Rules</span>
+                          <span className={styles.configValue}>
+                            {decision.rules.conditions?.length || 0} conditions ({decision.rules.operator})
+                          </span>
+                        </div>
+                      )}
+                      {decision.modelRefs && decision.modelRefs.length > 0 && (
+                        <div className={styles.configRow}>
+                          <span className={styles.configLabel}>Models</span>
+                          <div className={styles.endpointTags}>
+                            {decision.modelRefs.map((ref: { model: string; use_reasoning?: boolean }, idx: number) => (
+                              <span key={idx} className={styles.endpointTag}>
+                                {ref.model} {ref.use_reasoning && ''}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.emptyState}>No decisions configured</div>
+              )}
+            </>
+          ) : (
+            /* Legacy format - categories with model scores */
+            config?.categories && config.categories.length > 0 ? (
+              <div className={styles.categoryGridTwoColumn}>
+                {config.categories.map((category, index) => {
+                  // Normalize model_scores (handles both object and array formats)
+                  const normalizedScores = normalizeModelScores(category.model_scores)
+                  // Get reasoning info from best model (first model score)
+                  const bestModel = normalizedScores[0]
+                  const useReasoning = bestModel?.use_reasoning || false
+                  const reasoningEffort = bestModel?.reasoning_effort || 'medium'
+                  const reasoningDescription = bestModel?.reasoning_description || ''
+
+                  return (
+                    <div key={index} className={styles.categoryCard}>
+                      <div className={styles.categoryHeader}>
+                        <span className={styles.categoryName}>{category.name}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          {useReasoning && (
+                            <span className={`${styles.reasoningBadge} ${styles[`reasoning${reasoningEffort}`]}`}>
+                              {reasoningEffort}
+                            </span>
+                          )}
+                          {!isReadonly && (
+                            <button
+                              className={styles.editButton}
+                              onClick={() => {
+                                openEditModal(
+                                  `Edit Category: ${category.name}`,
+                                  {
+                                    system_prompt: category.system_prompt || ''
+                                  },
+                                  [
+                                    {
+                                      name: 'system_prompt',
+                                      label: 'System Prompt',
+                                      type: 'textarea',
+                                      placeholder: 'Enter system prompt for this category...',
+                                      description: 'Instructions for the model when handling this category'
+                                    }
+                                  ],
+                                  async (data) => {
+                                    const newConfig = { ...config }
+                                    if (newConfig.categories) {
+                                      newConfig.categories[index] = {
+                                        ...category,
+                                        ...data
+                                      }
+                                    }
+                                    await saveConfig(newConfig)
+                                  }
+                                )
+                              }}
+                            >
+
+                            </button>
+                          )}
                         </div>
                       </div>
-                    ))
-                  ) : (
-                    <div className={styles.emptyModelScores}>No models configured for this category</div>
-                  )}
-                </div>
+
+                      {/* System Prompt */}
+                      {category.system_prompt && (
+                        <div className={styles.systemPromptSection}>
+                          <div className={styles.systemPromptLabel}>System Prompt</div>
+                          <div className={styles.systemPromptText}>{category.system_prompt}</div>
+                        </div>
+                      )}
+
+                      {reasoningDescription && (
+                        <p className={styles.categoryDescription}>{reasoningDescription}</p>
+                      )}
+
+                      <div className={styles.categoryModels}>
+                        <div className={styles.categoryModelsHeader}>
+                          <span>Model Scores</span>
+                          {!isReadonly && (
+                            <button
+                              className={styles.addModelButton}
+                              onClick={() => {
+                                // Get available models from model_config
+                                const availableModels = config?.model_config
+                                  ? Object.keys(config.model_config)
+                                  : []
+
+                                openEditModal(
+                                  `Add Model to ${category.name}`,
+                                  {
+                                    model: availableModels[0] || '',
+                                    score: 0.5,
+                                    use_reasoning: false
+                                  },
+                                  [
+                                    {
+                                      name: 'model',
+                                      label: 'Model',
+                                      type: 'select',
+                                      options: availableModels,
+                                      required: true,
+                                      description: 'Select from configured models'
+                                    },
+                                    {
+                                      name: 'score',
+                                      label: 'Score',
+                                      type: 'number',
+                                      required: true,
+                                      placeholder: '0.5',
+                                      description: 'Model score (0-1)'
+                                    },
+                                    {
+                                      name: 'use_reasoning',
+                                      label: 'Use Reasoning',
+                                      type: 'boolean',
+                                      description: 'Enable reasoning for this model in this category'
+                                    }
+                                  ],
+                                  async (data) => {
+                                    const newConfig = { ...config }
+                                    if (newConfig.categories) {
+                                      const updatedCategory = { ...category }
+                                      // Convert to array format if needed (Legacy uses object)
+                                      const scores = normalizeModelScores(updatedCategory.model_scores)
+                                      scores.push(data)
+                                      updatedCategory.model_scores = scores
+                                      newConfig.categories[index] = updatedCategory
+                                    }
+                                    await saveConfig(newConfig)
+                                  },
+                                  'add'
+                                )
+                              }}
+                            >
+
+                            </button>
+                          )}
+                        </div>
+                        {normalizedScores.length > 0 ? (
+                          normalizedScores.map((modelScore, modelIdx) => (
+                            <div key={modelIdx} className={styles.modelScoreRow}>
+                              <span className={styles.modelScoreName}>
+                                {modelScore.model}
+                                {modelScore.use_reasoning && <span className={styles.reasoningIcon}></span>}
+                              </span>
+                              <div className={styles.scoreBar}>
+                                <div
+                                  className={styles.scoreBarFill}
+                                  style={{ width: `${(modelScore.score ?? 0) * 100}%` }}
+                                ></div>
+                                <span className={styles.scoreText}>{((modelScore.score ?? 0) * 100).toFixed(0)}%</span>
+                              </div>
+                              <div className={styles.modelScoreActions}>
+                                {!isReadonly && (
+                                  <>
+                                    <button
+                                      className={styles.editButton}
+                                      onClick={() => {
+                                        // Get available models from model_config
+                                        const availableModels = config?.model_config
+                                          ? Object.keys(config.model_config)
+                                          : []
+
+                                        openEditModal(
+                                          `Edit Model: ${modelScore.model}`,
+                                          { ...modelScore },
+                                          [
+                                            {
+                                              name: 'model',
+                                              label: 'Model',
+                                              type: 'select',
+                                              options: availableModels,
+                                              required: true,
+                                              description: 'Select from configured models'
+                                            },
+                                            {
+                                              name: 'score',
+                                              label: 'Score',
+                                              type: 'number',
+                                              required: true,
+                                              placeholder: '0.5',
+                                              description: 'Model score (0-1)'
+                                            },
+                                            {
+                                              name: 'use_reasoning',
+                                              label: 'Use Reasoning',
+                                              type: 'boolean',
+                                              description: 'Enable reasoning for this model in this category'
+                                            }
+                                          ],
+                                          async (data) => {
+                                            // For legacy object format, we need to convert back
+                                            const newConfig = { ...config }
+                                            if (newConfig.categories) {
+                                              const updatedCategory = { ...category }
+                                              // Convert to array format for consistency
+                                              const scores = normalizeModelScores(updatedCategory.model_scores)
+                                              scores[modelIdx] = data
+                                              updatedCategory.model_scores = scores
+                                              newConfig.categories[index] = updatedCategory
+                                            }
+                                            await saveConfig(newConfig)
+                                          }
+                                        )
+                                      }}
+                                    >
+
+                                    </button>
+                                    <button
+                                      className={styles.deleteButton}
+                                      onClick={() => {
+                                        if (confirm(`Remove model "${modelScore.model}" from this category?`)) {
+                                          const newConfig = { ...config }
+                                          if (newConfig.categories) {
+                                            const updatedCategory = { ...category }
+                                            // Convert to array format for consistency
+                                            const scores = normalizeModelScores(updatedCategory.model_scores)
+                                            scores.splice(modelIdx, 1)
+                                            updatedCategory.model_scores = scores
+                                            newConfig.categories[index] = updatedCategory
+                                          }
+                                          saveConfig(newConfig)
+                                        }
+                                      }}
+                                    >
+
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className={styles.emptyModelScores}>No models configured for this category</div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-            )})}
-          </div>
-        ) : (
-          <div className={styles.emptyState}>No categories configured</div>
-          )
-        )}
+            ) : (
+              <div className={styles.emptyState}>No categories configured</div>
+            )
+          )}
+        </div>
       </div>
-    </div>
-  )}
+    )
+  }
 
 
 
@@ -1568,7 +1818,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <h3 className={styles.sectionTitle}>Tools Configuration</h3>
-        {routerConfig.tools && (
+        {routerConfig.tools && !isReadonly && (
           <button
             className={styles.sectionEditButton}
             onClick={() => {
@@ -1681,63 +1931,63 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             {toolsError && <div className={styles.errorState}>Error loading tools: {toolsError}</div>}
 
             {!toolsLoading && !toolsError && toolsData.length > 0 && (
-                <div className={styles.toolsGrid}>
-                  {toolsData.map((tool, index) => (
-                    <div key={index} className={styles.toolCard}>
-                      <div className={styles.toolHeader}>
-                        <span className={styles.toolName}>{tool.tool.function.name}</span>
-                        {tool.category && (
-                          <span className={`${styles.badge} ${styles.badgeInfo}`}>{tool.category}</span>
-                        )}
-                      </div>
-
-                      {/* Function Description */}
-                      <div className={styles.toolFunctionDescription}>
-                        <strong>Function:</strong> {tool.tool.function.description}
-                      </div>
-
-                      {/* Similarity Description (used for matching) */}
-                      {tool.description && tool.description !== tool.tool.function.description && (
-                        <div className={styles.toolSimilarityDescription}>
-                          <div className={styles.similarityDescriptionLabel}>Similarity Keywords</div>
-                          <div className={styles.similarityDescriptionText}>{tool.description}</div>
-                        </div>
-                      )}
-
-                      {/* Parameters */}
-                      {tool.tool.function.parameters.properties && (
-                        <div className={styles.toolParameters}>
-                          <div className={styles.toolParametersHeader}>Parameters:</div>
-                          {Object.entries(tool.tool.function.parameters.properties).map(([paramName, paramInfo]: [string, any]) => (
-                            <div key={paramName} className={styles.toolParameter}>
-                              <div>
-                                <span className={styles.parameterName}>
-                                  {paramName}
-                                  {tool.tool.function.parameters.required?.includes(paramName) && (
-                                    <span className={styles.requiredBadge}>*</span>
-                                  )}
-                                </span>
-                                <span className={styles.parameterType}>{paramInfo.type}</span>
-                              </div>
-                              {paramInfo.description && (
-                                <div className={styles.parameterDescription}>{paramInfo.description}</div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Tags */}
-                      {tool.tags && tool.tags.length > 0 && (
-                        <div className={styles.toolTags}>
-                          {tool.tags.map((tag, idx) => (
-                            <span key={idx} className={styles.toolTag}>{tag}</span>
-                          ))}
-                        </div>
+              <div className={styles.toolsGrid}>
+                {toolsData.map((tool, index) => (
+                  <div key={index} className={styles.toolCard}>
+                    <div className={styles.toolHeader}>
+                      <span className={styles.toolName}>{tool.tool.function.name}</span>
+                      {tool.category && (
+                        <span className={`${styles.badge} ${styles.badgeInfo}`}>{tool.category}</span>
                       )}
                     </div>
-                  ))}
-                </div>
+
+                    {/* Function Description */}
+                    <div className={styles.toolFunctionDescription}>
+                      <strong>Function:</strong> {tool.tool.function.description}
+                    </div>
+
+                    {/* Similarity Description (used for matching) */}
+                    {tool.description && tool.description !== tool.tool.function.description && (
+                      <div className={styles.toolSimilarityDescription}>
+                        <div className={styles.similarityDescriptionLabel}>Similarity Keywords</div>
+                        <div className={styles.similarityDescriptionText}>{tool.description}</div>
+                      </div>
+                    )}
+
+                    {/* Parameters */}
+                    {tool.tool.function.parameters.properties && (
+                      <div className={styles.toolParameters}>
+                        <div className={styles.toolParametersHeader}>Parameters:</div>
+                        {Object.entries(tool.tool.function.parameters.properties).map(([paramName, paramInfo]: [string, any]) => (
+                          <div key={paramName} className={styles.toolParameter}>
+                            <div>
+                              <span className={styles.parameterName}>
+                                {paramName}
+                                {tool.tool.function.parameters.required?.includes(paramName) && (
+                                  <span className={styles.requiredBadge}>*</span>
+                                )}
+                              </span>
+                              <span className={styles.parameterType}>{paramInfo.type}</span>
+                            </div>
+                            {paramInfo.description && (
+                              <div className={styles.parameterDescription}>{paramInfo.description}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Tags */}
+                    {tool.tags && tool.tags.length > 0 && (
+                      <div className={styles.toolTags}>
+                        {tool.tags.map((tag, idx) => (
+                          <span key={idx} className={styles.toolTag}>{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </>
         ) : (
@@ -1755,7 +2005,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <h3 className={styles.sectionTitle}>Distributed Tracing</h3>
-        {routerConfig.observability?.tracing && (
+        {routerConfig.observability?.tracing && !isReadonly && (
           <button
             className={styles.sectionEditButton}
             onClick={() => {
@@ -1878,7 +2128,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
     <div className={styles.section}>
       <div className={styles.sectionHeader}>
         <h3 className={styles.sectionTitle}>Batch Classification API</h3>
-        {routerConfig.api?.batch_classification && (
+        {routerConfig.api?.batch_classification && !isReadonly && (
           <button
             className={styles.sectionEditButton}
             onClick={() => {
@@ -2004,9 +2254,6 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
   const renderSignalsSection = () => {
     const signals = config?.signals
 
-    // Unified signal type
-    type SignalType = 'Keywords' | 'Embeddings' | 'Domain' | 'Preference' | 'Fact Check' | 'User Feedback'
-
     interface UnifiedSignal {
       name: string
       type: SignalType
@@ -2079,6 +2326,55 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
       })
     })
 
+    // Language
+    signals?.language?.forEach(lang => {
+      allSignals.push({
+        name: lang.name,
+        type: 'Language',
+        summary: 'Language detection rule',
+        rawData: lang
+      })
+    })
+
+    // Latency
+    signals?.latency?.forEach(lat => {
+      const parts: string[] = []
+      if (lat.tpot_percentile) {
+        parts.push(`TPOT: ${lat.tpot_percentile}th percentile`)
+      }
+      if (lat.ttft_percentile) {
+        parts.push(`TTFT: ${lat.ttft_percentile}th percentile`)
+      }
+      allSignals.push({
+        name: lat.name,
+        type: 'Latency',
+        summary: parts.length > 0 ? parts.join(', ') : 'Latency signal',
+        rawData: lat
+      })
+    })
+
+    // Context
+    signals?.context?.forEach(ctx => {
+      allSignals.push({
+        name: ctx.name,
+        type: 'Context',
+        summary: `${ctx.min_tokens} to ${ctx.max_tokens} tokens`,
+        rawData: ctx
+      })
+    })
+
+    // Complexity
+    signals?.complexity?.forEach(comp => {
+      const hardCount = comp.hard?.candidates?.length || 0
+      const easyCount = comp.easy?.candidates?.length || 0
+      allSignals.push({
+        name: comp.name,
+        type: 'Complexity',
+        summary: `Threshold: ${comp.threshold}, ${hardCount} hard / ${easyCount} easy candidates`,
+        rawData: comp
+      })
+    })
+
     // Filter signals based on search
     const filteredSignals = allSignals.filter(signal =>
       signal.name.toLowerCase().includes(signalsSearch.toLowerCase()) ||
@@ -2106,7 +2402,11 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             'Domain': 'rgba(147, 51, 234, 0.15)',
             'Preference': 'rgba(234, 179, 8, 0.15)',
             'Fact Check': 'rgba(34, 197, 94, 0.15)',
-            'User Feedback': 'rgba(236, 72, 153, 0.15)'
+            'User Feedback': 'rgba(236, 72, 153, 0.15)',
+            'Language': 'rgba(59, 130, 246, 0.15)',
+            'Latency': 'rgba(168, 85, 247, 0.15)',
+            'Context': 'rgba(251, 146, 60, 0.15)',
+            'Complexity': 'rgba(66, 153, 225, 0.15)'
           }
           return (
             <span className={styles.badge} style={{ background: typeColors[row.type] }}>
@@ -2226,6 +2526,94 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             }
           ]
         })
+      } else if (signal.type === 'Language') {
+        sections.push({
+          title: 'Language Signal',
+          fields: [
+            { label: 'Language Code', value: signal.rawData.name || 'N/A', fullWidth: true },
+            { label: 'Description', value: signal.rawData.description || 'N/A', fullWidth: true }
+          ]
+        })
+      } else if (signal.type === 'Latency') {
+        sections.push({
+          title: 'Latency Signal',
+          fields: [
+            { label: 'TPOT Percentile', value: signal.rawData.tpot_percentile ? `${signal.rawData.tpot_percentile}th percentile` : 'N/A', fullWidth: true },
+            { label: 'TTFT Percentile', value: signal.rawData.ttft_percentile ? `${signal.rawData.ttft_percentile}th percentile` : 'N/A', fullWidth: true },
+            { label: 'Description', value: signal.rawData.description || 'N/A', fullWidth: true }
+          ]
+        })
+      } else if (signal.type === 'Context') {
+        sections.push({
+          title: 'Context Signal',
+          fields: [
+            { label: 'Min Tokens', value: signal.rawData.min_tokens || 'N/A', fullWidth: true },
+            { label: 'Max Tokens', value: signal.rawData.max_tokens || 'N/A', fullWidth: true },
+            { label: 'Description', value: signal.rawData.description || 'N/A', fullWidth: true }
+          ]
+        })
+      } else if (signal.type === 'Complexity') {
+        const fields: Array<{ label: string; value: React.ReactNode; fullWidth?: boolean }> = [
+          { label: 'Threshold', value: signal.rawData.threshold?.toString() || 'N/A', fullWidth: true }
+        ]
+
+        // Add composer if present
+        if (signal.rawData.composer) {
+          fields.push({
+            label: 'Composer',
+            value: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div><strong>Operator:</strong> {signal.rawData.composer.operator}</div>
+                <div><strong>Conditions:</strong></div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', marginLeft: '1rem' }}>
+                  {signal.rawData.composer.conditions.map((cond: { type: string; name: string }, i: number) => (
+                    <div key={i} style={{
+                      padding: '0.5rem',
+                      background: 'rgba(255, 165, 0, 0.1)',
+                      borderRadius: '4px',
+                      fontSize: '0.875rem',
+                      fontFamily: 'var(--font-mono)'
+                    }}>
+                      {cond.type}: {cond.name}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ),
+            fullWidth: true
+          })
+        }
+
+        fields.push(
+          {
+            label: 'Hard Candidates',
+            value: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontFamily: 'var(--font-mono)', fontSize: '0.875rem' }}>
+                {(signal.rawData.hard?.candidates || []).map((c: string, i: number) => (
+                  <div key={i}>• {c}</div>
+                ))}
+              </div>
+            ),
+            fullWidth: true
+          },
+          {
+            label: 'Easy Candidates',
+            value: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontFamily: 'var(--font-mono)', fontSize: '0.875rem' }}>
+                {(signal.rawData.easy?.candidates || []).map((c: string, i: number) => (
+                  <div key={i}>• {c}</div>
+                ))}
+              </div>
+            ),
+            fullWidth: true
+          },
+          { label: 'Description', value: signal.rawData.description || 'N/A', fullWidth: true }
+        )
+
+        sections.push({
+          title: 'Complexity Signal',
+          fields
+        })
       } else {
         // Preference, Fact Check, User Feedback
         sections.push({
@@ -2242,18 +2630,492 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
       setViewModalOpen(true)
     }
 
-    // Handle edit signal (placeholder)
-    const handleEditSignal = (signal: UnifiedSignal) => {
+    const openSignalEditor = (mode: 'add' | 'edit', signal?: UnifiedSignal) => {
       setViewModalOpen(false)
-      // TODO: Implement edit functionality
-      console.log('Edit signal:', signal)
+      const defaultForm: AddSignalFormState = {
+        type: 'Keywords',
+        name: '',
+        description: '',
+        operator: 'AND',
+        keywords: '',
+        case_sensitive: false,
+        threshold: 0.8,
+        candidates: '',
+        aggregation_method: 'mean',
+        mmlu_categories: '',
+        tpot_percentile: undefined,
+        ttft_percentile: undefined,
+        min_tokens: '0',
+        max_tokens: '8K',
+        complexity_threshold: 0.1,
+        hard_candidates: '',
+        easy_candidates: '',
+        composer_operator: 'AND',
+        composer_conditions: ''
+      }
+
+      const initialData: AddSignalFormState = mode === 'edit' && signal ? {
+        type: signal.type,
+        name: signal.name,
+        description: signal.rawData.description || '',
+        operator: signal.rawData.operator || 'AND',
+        keywords: (signal.rawData.keywords || []).join('\n'),
+        case_sensitive: !!signal.rawData.case_sensitive,
+        threshold: signal.rawData.threshold ?? 0.8,
+        candidates: (signal.rawData.candidates || []).join('\n'),
+        aggregation_method: signal.rawData.aggregation_method || 'mean',
+        mmlu_categories: (signal.rawData.mmlu_categories || []).join('\n'),
+        tpot_percentile: signal.rawData.tpot_percentile,
+        ttft_percentile: signal.rawData.ttft_percentile,
+        min_tokens: signal.rawData.min_tokens || '0',
+        max_tokens: signal.rawData.max_tokens || '8K',
+        complexity_threshold: signal.rawData.threshold ?? 0.1,
+        hard_candidates: (signal.rawData.hard?.candidates || []).join('\n'),
+        easy_candidates: (signal.rawData.easy?.candidates || []).join('\n'),
+        composer_operator: signal.rawData.composer?.operator || 'AND',
+        composer_conditions: signal.rawData.composer?.conditions?.map((c: { type: string; name: string }) => `${c.type}:${c.name}`).join('\n') || ''
+      } : defaultForm
+
+
+      const conditionallyHideFieldExceptType = (type: SignalType) => {
+        return (formData: AddSignalFormState) => formData.type !== type
+      }
+
+      const keywordFields: FieldConfig[] = [
+        {
+          name: 'operator',
+          label: 'Operator (keywords only)',
+          type: 'select',
+          options: ['AND', 'OR'],
+          description: 'Used when type is Keywords',
+          shouldHide: conditionallyHideFieldExceptType('Keywords')
+        },
+        {
+          name: 'case_sensitive',
+          label: 'Case Sensitive (keywords only)',
+          type: 'boolean',
+          description: 'Whether keyword matching is case sensitive',
+          shouldHide: conditionallyHideFieldExceptType('Keywords')
+        },
+        {
+          name: 'keywords',
+          label: 'Keywords',
+          type: 'textarea',
+          placeholder: 'Comma or newline separated keywords',
+          shouldHide: conditionallyHideFieldExceptType('Keywords')
+        },
+      ]
+
+
+      const embeddingFields: FieldConfig[] = [{
+        name: 'threshold',
+        label: 'Threshold (embeddings only)',
+        type: 'number',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        placeholder: '0.80',
+        shouldHide: conditionallyHideFieldExceptType('Embeddings')
+      },
+      {
+        name: 'aggregation_method',
+        label: 'Aggregation Method (embeddings only)',
+        type: 'text',
+        placeholder: 'mean',
+        shouldHide: conditionallyHideFieldExceptType('Embeddings')
+      },
+      {
+        name: 'candidates',
+        label: 'Candidates (embeddings only)',
+        type: 'textarea',
+        placeholder: 'One candidate per line or comma separated',
+        shouldHide: conditionallyHideFieldExceptType('Embeddings')
+      }]
+
+      const domainFields: FieldConfig[] = [
+        {
+          name: 'mmlu_categories',
+          label: 'MMLU Categories (domains only)',
+          type: 'textarea',
+          placeholder: 'Comma or newline separated categories',
+          shouldHide: conditionallyHideFieldExceptType('Domain')
+        }
+      ]
+
+      const latencyFields: FieldConfig[] = [
+        {
+          name: 'tpot_percentile',
+          label: 'TPOT Percentile (latency only)',
+          type: 'number',
+          min: 1,
+          max: 100,
+          step: 1,
+          placeholder: '10',
+          description: 'TPOT (Time Per Output Token) percentile bucket (1-100). Example: 10 = 10th percentile (top 10% fastest TPOT). Works with any number of observations, adapts to model performance. ⚠️ RECOMMENDED: Use both TPOT and TTFT for comprehensive latency evaluation.',
+          shouldHide: conditionallyHideFieldExceptType('Latency')
+        },
+        {
+          name: 'ttft_percentile',
+          label: 'TTFT Percentile (latency only)',
+          type: 'number',
+          min: 1,
+          max: 100,
+          step: 1,
+          placeholder: '10',
+          description: 'TTFT (Time To First Token) percentile bucket (1-100). Example: 10 = 10th percentile (top 10% fastest TTFT). Works with any number of observations, adapts to model performance. ⚠️ RECOMMENDED: Use both TPOT and TTFT for comprehensive latency evaluation. At least one of TPOT or TTFT percentile must be set.',
+          shouldHide: conditionallyHideFieldExceptType('Latency')
+        }
+      ]
+
+      const contextFields: FieldConfig[] = [
+        {
+          name: 'min_tokens',
+          label: 'Minimum Tokens (context only)',
+          type: 'text',
+          placeholder: 'e.g., 0, 8K, 1M',
+          description: 'Minimum token count (supports K/M suffixes)',
+          shouldHide: conditionallyHideFieldExceptType('Context')
+        },
+        {
+          name: 'max_tokens',
+          label: 'Maximum Tokens (context only)',
+          type: 'text',
+          placeholder: 'e.g., 8K, 1024K',
+          description: 'Maximum token count (supports K/M suffixes)',
+          shouldHide: conditionallyHideFieldExceptType('Context')
+        }
+      ]
+
+      const complexityFields: FieldConfig[] = [
+        {
+          name: 'complexity_threshold',
+          label: 'Threshold (complexity only)',
+          type: 'number',
+          placeholder: 'e.g., 0.1',
+          description: 'Similarity difference threshold for hard/easy classification',
+          shouldHide: conditionallyHideFieldExceptType('Complexity')
+        },
+        {
+          name: 'composer_operator',
+          label: 'Composer Operator (complexity only)',
+          type: 'select',
+          options: ['AND', 'OR'],
+          description: 'Logical operator for composer conditions (recommended to filter based on other signals)',
+          shouldHide: conditionallyHideFieldExceptType('Complexity')
+        },
+        {
+          name: 'composer_conditions',
+          label: 'Composer Conditions (complexity only)',
+          type: 'textarea',
+          placeholder: 'One condition per line in format type:name, e.g.:\ndomain:computer_science\nkeyword:coding',
+          description: 'Filter this complexity signal based on other signals (RECOMMENDED). Format: type:name per line',
+          shouldHide: conditionallyHideFieldExceptType('Complexity')
+        },
+        {
+          name: 'hard_candidates',
+          label: 'Hard Candidates (complexity only)',
+          type: 'textarea',
+          placeholder: 'One candidate per line, e.g.:\ndesign distributed system\nimplement consensus algorithm',
+          description: 'Phrases representing hard/complex queries',
+          shouldHide: conditionallyHideFieldExceptType('Complexity')
+        },
+        {
+          name: 'easy_candidates',
+          label: 'Easy Candidates (complexity only)',
+          type: 'textarea',
+          placeholder: 'One candidate per line, e.g.:\nprint hello world\nloop through array',
+          description: 'Phrases representing easy/simple queries',
+          shouldHide: conditionallyHideFieldExceptType('Complexity')
+        }
+      ]
+
+      const fields: FieldConfig[] = [
+        {
+          name: 'type',
+          label: 'Type',
+          type: 'select',
+          options: ['Keywords', 'Embeddings', 'Domain', 'Preference', 'Fact Check', 'User Feedback', 'Language', 'Latency', 'Context', 'Complexity'],
+          required: true,
+          description: 'Fields are validated based on the selected type.'
+        },
+        {
+          name: 'name',
+          label: 'Name',
+          type: 'text',
+          required: true,
+          placeholder: 'Enter a unique signal name here'
+        },
+        {
+          name: 'description',
+          label: 'Description',
+          type: 'textarea',
+          placeholder: 'Optional description for this signal'
+        },
+        ...keywordFields,
+        ...embeddingFields,
+        ...domainFields,
+        ...latencyFields,
+        ...contextFields,
+        ...complexityFields,
+      ]
+
+      const saveSignal = async (formData: AddSignalFormState) => {
+        if (!config) {
+          throw new Error('Configuration not loaded yet.')
+        }
+
+        if (!isPythonCLI) {
+          throw new Error('Editing signals is only supported for Python CLI configs.')
+        }
+
+        const name = (formData.name || '').trim()
+        if (!name) {
+          throw new Error('Name is required.')
+        }
+
+        const type = formData.type as SignalType
+        if (!type) {
+          throw new Error('Type is required.')
+        }
+
+        const newConfig: ConfigData = { ...config }
+        if (!newConfig.signals) newConfig.signals = {}
+
+        if (mode === 'edit' && signal) {
+          removeSignalByName(newConfig, signal.type, signal.name)
+        }
+
+        // type specific validations
+        switch (type) {
+          case 'Keywords': {
+            const keywords = listInputToArray(formData.keywords || '')
+            if (keywords.length === 0) {
+              throw new Error('Please provide at least one keyword.')
+            }
+            newConfig.signals.keywords = [
+              ...(newConfig.signals.keywords || []),
+              {
+                name,
+                operator: formData.operator,
+                keywords,
+                case_sensitive: !!formData.case_sensitive
+              }
+            ]
+            break
+          }
+          case 'Embeddings': {
+            const candidates = listInputToArray(formData.candidates || '')
+            if (candidates.length === 0) {
+              throw new Error('Please provide at least one candidate string.')
+            }
+            const threshold = Number.isFinite(formData.threshold)
+              ? Math.max(0, Math.min(1, formData.threshold))
+              : 0
+            newConfig.signals.embeddings = [
+              ...(newConfig.signals.embeddings || []),
+              {
+                name,
+                threshold,
+                candidates,
+                aggregation_method: formData.aggregation_method || 'mean'
+              }
+            ]
+            break
+          }
+          case 'Domain': {
+            const mmlu_categories = listInputToArray(formData.mmlu_categories || '')
+            newConfig.signals.domains = [
+              ...(newConfig.signals.domains || []),
+              {
+                name,
+                description: formData.description,
+                mmlu_categories
+              }
+            ]
+            break
+          }
+          case 'Preference': {
+            newConfig.signals.preferences = [
+              ...(newConfig.signals.preferences || []),
+              {
+                name,
+                description: formData.description
+              }
+            ]
+            break
+          }
+          case 'Fact Check': {
+            newConfig.signals.fact_check = [
+              ...(newConfig.signals.fact_check || []),
+              {
+                name,
+                description: formData.description
+              }
+            ]
+            break
+          }
+          case 'User Feedback': {
+            newConfig.signals.user_feedbacks = [
+              ...(newConfig.signals.user_feedbacks || []),
+              {
+                name,
+                description: formData.description
+              }
+            ]
+            break
+          }
+          case 'Language': {
+            newConfig.signals.language = [
+              ...(newConfig.signals.language || []),
+              {
+                name
+              }
+            ]
+            break
+          }
+          case 'Latency': {
+            const tpot_percentile = formData.tpot_percentile
+            const ttft_percentile = formData.ttft_percentile
+
+            // Validate: at least one of tpot_percentile or ttft_percentile must be set
+            if ((tpot_percentile === undefined || tpot_percentile <= 0) && (ttft_percentile === undefined || ttft_percentile <= 0)) {
+              throw new Error('Either TPOT Percentile or TTFT Percentile must be set for latency signals (or both)')
+            }
+            if (tpot_percentile !== undefined && (tpot_percentile < 1 || tpot_percentile > 100)) {
+              throw new Error('TPOT Percentile must be between 1 and 100')
+            }
+            if (ttft_percentile !== undefined && (ttft_percentile < 1 || ttft_percentile > 100)) {
+              throw new Error('TTFT Percentile must be between 1 and 100')
+            }
+
+            const latencySignal: { name: string; description?: string; tpot_percentile?: number; ttft_percentile?: number } = {
+              name,
+            }
+            if (formData.description) {
+              latencySignal.description = formData.description
+            }
+            if (tpot_percentile !== undefined && tpot_percentile > 0) {
+              latencySignal.tpot_percentile = tpot_percentile
+            }
+            if (ttft_percentile !== undefined && ttft_percentile > 0) {
+              latencySignal.ttft_percentile = ttft_percentile
+            }
+
+            newConfig.signals.latency = [
+              ...(newConfig.signals.latency || []),
+              latencySignal
+            ]
+            break
+          }
+          case 'Context': {
+            const min_tokens = (formData.min_tokens || '0').trim()
+            const max_tokens = (formData.max_tokens || '8K').trim()
+            if (!min_tokens || !max_tokens) {
+              throw new Error('Both min_tokens and max_tokens are required.')
+            }
+            newConfig.signals.context = [
+              ...(newConfig.signals.context || []),
+              {
+                name,
+                min_tokens,
+                max_tokens,
+                description: formData.description || undefined
+              }
+            ]
+            break
+          }
+          case 'Complexity': {
+            const complexity_threshold = formData.complexity_threshold ?? 0.1
+            const hard_candidates = (formData.hard_candidates || '').trim()
+            const easy_candidates = (formData.easy_candidates || '').trim()
+
+            if (!hard_candidates || !easy_candidates) {
+              throw new Error('Both hard and easy candidates are required.')
+            }
+
+            const hardList = hard_candidates.split('\n').map(c => c.trim()).filter(c => c.length > 0)
+            const easyList = easy_candidates.split('\n').map(c => c.trim()).filter(c => c.length > 0)
+
+            if (hardList.length === 0 || easyList.length === 0) {
+              throw new Error('Both hard and easy candidates must have at least one entry.')
+            }
+
+            // Parse composer conditions if provided
+            const composer_conditions_str = (formData.composer_conditions || '').trim()
+            let composer = undefined
+            if (composer_conditions_str) {
+              const conditions = composer_conditions_str
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0)
+                .map(line => {
+                  const parts = line.split(':')
+                  if (parts.length !== 2) {
+                    throw new Error(`Invalid composer condition format: "${line}". Expected format: type:name`)
+                  }
+                  return {
+                    type: parts[0].trim(),
+                    name: parts[1].trim()
+                  }
+                })
+
+              if (conditions.length > 0) {
+                composer = {
+                  operator: formData.composer_operator || 'AND',
+                  conditions
+                }
+              }
+            }
+
+            newConfig.signals.complexity = [
+              ...(newConfig.signals.complexity || []),
+              {
+                name,
+                threshold: complexity_threshold,
+                hard: {
+                  candidates: hardList
+                },
+                easy: {
+                  candidates: easyList
+                },
+                description: formData.description || undefined,
+                ...(composer && { composer })
+              }
+            ]
+            break
+          }
+          default:
+            throw new Error('Unsupported signal type.')
+        }
+
+        await saveConfig(newConfig)
+      }
+
+      openEditModal(
+        mode === 'add' ? 'Add Signal' : `Edit Signal: ${signal?.name}`,
+        initialData,
+        fields,
+        saveSignal,
+        mode
+      )
     }
 
-    // Handle delete signal (placeholder)
-    const handleDeleteSignal = (signal: UnifiedSignal) => {
+    const handleEditSignal = (signal: UnifiedSignal) => {
+      openSignalEditor('edit', signal)
+    }
+
+    // Handle delete signal
+    const handleDeleteSignal = async (signal: UnifiedSignal) => {
       if (confirm(`Are you sure you want to delete signal "${signal.name}"?`)) {
-        // TODO: Implement delete functionality
-        console.log('Delete signal:', signal)
+        if (!config || !isPythonCLI) {
+          alert('Deleting signals is only supported for Python CLI configs.')
+          return
+        }
+
+        const newConfig: ConfigData = { ...config }
+        removeSignalByName(newConfig, signal.type, signal.name)
+
+        await saveConfig(newConfig)
       }
     }
 
@@ -2265,8 +3127,9 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
           searchPlaceholder="Search signals..."
           searchValue={signalsSearch}
           onSearchChange={setSignalsSearch}
-          onAdd={() => console.log('Add signal')}
+          onAdd={() => openSignalEditor('add')}
           addButtonText="Add Signal"
+          disabled={isReadonly}
         />
 
         {isPythonCLI ? (
@@ -2278,6 +3141,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             onEdit={handleEditSignal}
             onDelete={handleDeleteSignal}
             emptyMessage={signalsSearch ? 'No signals match your search' : 'No signals configured'}
+            readonly={isReadonly}
           />
         ) : (
           <div className={styles.emptyState}>
@@ -2436,19 +3300,465 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
       setViewModalOpen(true)
     }
 
-    // Handle edit decision (placeholder for now)
-    const handleEditDecision = (decision: DecisionRow) => {
+    const openDecisionEditor = (mode: 'add' | 'edit', decision?: DecisionRow) => {
       setViewModalOpen(false)
-      // TODO: Implement edit functionality
-      console.log('Edit decision:', decision)
+      const conditionTypeOptions = ['keyword', 'domain', 'preference', 'user_feedback', 'embedding', 'language', 'latency'] as const
+
+      const getConditionNameOptions = (type?: DecisionConditionType) => {
+        // derive condition name options based on signals configured
+        switch (type) {
+          case 'keyword':
+            return config?.signals?.keywords?.map((k) => k.name) || []
+          case 'domain':
+            return config?.signals?.domains?.map((d) => d.name) || []
+          case 'preference':
+            return config?.signals?.preferences?.map((p) => p.name) || []
+          case 'user_feedback':
+            return config?.signals?.user_feedbacks?.map((u) => u.name) || []
+          case 'embedding':
+            return config?.signals?.embeddings?.map((e) => e.name) || []
+          case 'latency':
+            return config?.signals?.latency?.map((l) => l.name) || []
+          default:
+            return []
+        }
+      }
+
+      const defaultForm: DecisionFormState = {
+        name: '',
+        description: '',
+        priority: 1,
+        operator: 'AND',
+        conditions: [{ type: 'keyword', name: '' }],
+        modelRefs: [{ model: '', use_reasoning: false }],
+        plugins: []
+      }
+
+      const initialData: DecisionFormState = mode === 'edit' && decision ? {
+        name: decision.name,
+        description: decision.description || '',
+        priority: decision.priority ?? 1,
+        operator: decision.rules?.operator || 'AND',
+        conditions: (decision.rules?.conditions || []).map((cond) => ({
+          type: cond.type,
+          name: cond.name
+        })),
+        modelRefs: (decision.modelRefs || []).map((ref) => ({
+          model: ref.model,
+          use_reasoning: !!ref.use_reasoning
+        })),
+        plugins: (decision.plugins || []).map((plugin) => ({
+          type: plugin.type,
+          configuration: JSON.stringify(plugin.configuration || {}, null, 2)
+        }))
+      } : defaultForm
+
+      const renderConditionsEditor = (
+        value: DecisionFormState['conditions'],
+        onChange: (value: DecisionFormState['conditions']) => void
+      ) => {
+        const rows = (Array.isArray(value) ? value : []).length ? value : [{ type: 'keyword', name: '' }]
+
+        const updateItem = (index: number, key: 'type' | 'name', val: string) => {
+          const next = rows.map((item, idx) => {
+            if (idx !== index) return item
+            if (key === 'type') {
+              return { type: val, name: '' }
+            }
+            return { ...item, [key]: val }
+          })
+          onChange(next)
+        }
+
+        const removeItem = (index: number) => {
+          const next = rows.filter((_, idx) => idx !== index)
+          onChange(next.length ? next : [{ type: 'keyword', name: '' }])
+        }
+
+        const addItem = () => onChange([...rows, { type: 'keyword', name: '' }])
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {rows.map((cond, idx) => (
+              <div
+                key={idx}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr auto',
+                  gap: '0.5rem',
+                  alignItems: 'center'
+                }}
+              >
+                <select
+                  value={cond?.type || conditionTypeOptions[0]}
+                  onChange={(e) => updateItem(idx, 'type', e.target.value)}
+                  style={{ padding: '0.55rem 0.75rem', borderRadius: 6, border: '1px solid var(--color-border)' }}
+                >
+                  {conditionTypeOptions.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+                <select
+                  value={cond?.name || ''}
+                  onChange={(e) => updateItem(idx, 'name', e.target.value)}
+                  style={{ padding: '0.55rem 0.75rem', borderRadius: 6, border: '1px solid var(--color-border)' }}
+                >
+                  <option value="" disabled>Select name</option>
+                  {getConditionNameOptions(cond?.type as DecisionConditionType).map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                  {getConditionNameOptions(cond?.type as DecisionConditionType).length === 0 && (
+                    <option value="" disabled>No matching signals</option>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => removeItem(idx)}
+                  style={{
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: 6,
+                    border: '1px solid var(--color-border)',
+                    background: 'transparent',
+                    color: 'var(--color-text)'
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addItem}
+              style={{
+                width: 'fit-content',
+                padding: '0.5rem 0.75rem',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'transparent',
+                color: 'var(--color-text)'
+              }}
+            >
+              Add Condition
+            </button>
+          </div>
+        )
+      }
+
+      const renderModelRefsEditor = (
+        value: DecisionFormState['modelRefs'],
+        onChange: (value: DecisionFormState['modelRefs']) => void
+      ) => {
+        const rows = (Array.isArray(value) ? value : []).length ? value : [{ model: '', use_reasoning: false }]
+
+        const updateItem = (index: number, key: 'model' | 'use_reasoning', val: string | boolean) => {
+          const next = rows.map((item, idx) => idx === index ? { ...item, [key]: val } : item)
+          onChange(next)
+        }
+
+        const removeItem = (index: number) => {
+          const next = rows.filter((_, idx) => idx !== index)
+          onChange(next.length ? next : [{ model: '', use_reasoning: false }])
+        }
+
+        const addItem = () => onChange([...rows, { model: '', use_reasoning: false }])
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {rows.map((ref, idx) => (
+              <div
+                key={idx}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr auto auto',
+                  gap: '0.5rem',
+                  alignItems: 'center'
+                }}
+              >
+                <input
+                  type="text"
+                  value={ref?.model || ''}
+                  onChange={(e) => updateItem(idx, 'model', e.target.value)}
+                  placeholder="Model name (e.g. gpt-4o)"
+                  style={{ padding: '0.55rem 0.75rem', borderRadius: 6, border: '1px solid var(--color-border)' }}
+                />
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--color-text-secondary)' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!ref?.use_reasoning}
+                    onChange={(e) => updateItem(idx, 'use_reasoning', e.target.checked)}
+                  />
+                  Use reasoning
+                </label>
+                <button
+                  type="button"
+                  onClick={() => removeItem(idx)}
+                  style={{
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: 6,
+                    border: '1px solid var(--color-border)',
+                    background: 'transparent',
+                    color: 'var(--color-text)'
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addItem}
+              style={{
+                width: 'fit-content',
+                padding: '0.5rem 0.75rem',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'transparent',
+                color: 'var(--color-text)'
+              }}
+            >
+              Add Model Reference
+            </button>
+          </div>
+        )
+      }
+
+      const renderPluginsEditor = (
+        value: DecisionFormState['plugins'],
+        onChange: (value: DecisionFormState['plugins']) => void
+      ) => {
+        const rows = Array.isArray(value) ? value : []
+
+        const updateItem = (index: number, key: 'type' | 'configuration', val: string | Record<string, unknown>) => {
+          const next = rows.map((item, idx) => idx === index ? { ...item, [key]: val } : item)
+          onChange(next)
+        }
+
+        const removeItem = (index: number) => {
+          const next = rows.filter((_, idx) => idx !== index)
+          onChange(next)
+        }
+
+        const addItem = () => onChange([...rows, { type: '', configuration: '' }])
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {rows.map((plugin, idx) => (
+              <div
+                key={idx}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr',
+                  gap: '0.5rem',
+                  padding: '0.75rem',
+                  borderRadius: 8,
+                  border: '1px solid var(--color-border)'
+                }}
+              >
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.5rem', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    value={plugin?.type || ''}
+                    onChange={(e) => updateItem(idx, 'type', e.target.value)}
+                    placeholder="Plugin type (e.g. logging)"
+                    style={{ padding: '0.55rem 0.75rem', borderRadius: 6, border: '1px solid var(--color-border)' }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeItem(idx)}
+                    style={{
+                      padding: '0.5rem 0.75rem',
+                      borderRadius: 6,
+                      border: '1px solid var(--color-border)',
+                      background: 'transparent',
+                      color: 'var(--color-text)'
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <textarea
+                  value={typeof plugin?.configuration === 'string' ? plugin.configuration : JSON.stringify(plugin?.configuration || {}, null, 2)}
+                  onChange={(e) => updateItem(idx, 'configuration', e.target.value)}
+                  placeholder='Configuration JSON (optional)'
+                  rows={4}
+                  style={{
+                    padding: '0.55rem 0.75rem',
+                    borderRadius: 6,
+                    border: '1px solid var(--color-border)',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '0.9rem'
+                  }}
+                />
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={addItem}
+              style={{
+                width: 'fit-content',
+                padding: '0.5rem 0.75rem',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'transparent',
+                color: 'var(--color-text)'
+              }}
+            >
+              Add Plugin
+            </button>
+          </div>
+        )
+      }
+
+      const fields: FieldConfig[] = [
+        {
+          name: 'name',
+          label: 'Name',
+          type: 'text',
+          required: true,
+          placeholder: 'Enter a unique decision name'
+        },
+        {
+          name: 'description',
+          label: 'Description',
+          type: 'textarea',
+          placeholder: 'What does this decision route?'
+        },
+        {
+          name: 'priority',
+          label: 'Priority',
+          type: 'number',
+          min: 0,
+          placeholder: '1'
+        },
+        {
+          name: 'operator',
+          label: 'Rules Operator',
+          type: 'select',
+          options: ['AND', 'OR'],
+          required: true
+        },
+        {
+          name: 'conditions',
+          label: 'Conditions',
+          type: 'custom',
+          description: 'Add routing conditions (type and name).',
+          customRender: renderConditionsEditor
+        },
+        {
+          name: 'modelRefs',
+          label: 'Model References',
+          type: 'custom',
+          description: 'Set target models and whether to enable reasoning.',
+          customRender: renderModelRefsEditor
+        },
+        {
+          name: 'plugins',
+          label: 'Plugins',
+          type: 'custom',
+          description: 'Optional plugins applied to this decision.',
+          customRender: renderPluginsEditor
+        }
+      ]
+
+      const saveDecision = async (formData: DecisionFormState) => {
+        if (!config) {
+          throw new Error('Configuration not loaded yet.')
+        }
+
+        if (!isPythonCLI) {
+          throw new Error('Decisions are only supported for Python CLI configs.')
+        }
+
+        const name = (formData.name || '').trim()
+        if (!name) {
+          throw new Error('Name is required.')
+        }
+
+        const priority = Number.isFinite(formData.priority) ? formData.priority : 0
+
+        const normalizedConditions = (formData.conditions || []).filter((c) => (c?.type || '').trim() || (c?.name || '').trim())
+        const conditions = normalizedConditions.map((c, idx) => {
+          const type = (c?.type || '').trim()
+          const name = (c?.name || '').trim()
+          if (!type || !name) {
+            throw new Error(`Condition #${idx + 1} needs both type and name.`)
+          }
+          return { type, name }
+        })
+
+        const normalizedModelRefs = (formData.modelRefs || []).filter((m) => (m?.model || '').trim())
+        const modelRefs = normalizedModelRefs.map((m, idx) => {
+          const model = (m?.model || '').trim()
+          if (!model) {
+            throw new Error(`Model reference #${idx + 1} is missing a model name.`)
+          }
+          return { model, use_reasoning: !!m?.use_reasoning }
+        })
+
+        const normalizedPlugins = (formData.plugins || []).filter((p) => {
+          const hasType = (p?.type || '').trim()
+          const hasConfigString = typeof p?.configuration === 'string' && (p.configuration as string).trim()
+          const hasConfigObject = p?.configuration && typeof p.configuration === 'object'
+          return hasType || hasConfigString || hasConfigObject
+        })
+
+        const plugins = normalizedPlugins.map((p, idx) => {
+          const type = (p?.type || '').trim()
+          if (!type) {
+            throw new Error(`Plugin #${idx + 1} must include a type.`)
+          }
+
+          let configuration: Record<string, unknown> = {}
+          if (typeof p?.configuration === 'string') {
+            const trimmed = p.configuration.trim()
+            if (trimmed) {
+              try {
+                configuration = JSON.parse(trimmed)
+              } catch {
+                throw new Error(`Plugin #${idx + 1} configuration must be valid JSON.`)
+              }
+            }
+          } else if (p?.configuration && typeof p.configuration === 'object') {
+            configuration = p.configuration as Record<string, unknown>
+          }
+
+          return { type, configuration }
+        })
+
+        const newDecision: DecisionConfig = {
+          name,
+          description: formData.description,
+          priority: priority || 0,
+          rules: {
+            operator: formData.operator,
+            conditions
+          },
+          modelRefs,
+          plugins
+        }
+
+        const newConfig: ConfigData = { ...config }
+        newConfig.decisions = [...(newConfig.decisions || [])]
+
+        if (mode === 'edit' && decision) {
+          removeDecisionByName(newConfig, decision.name)
+        }
+
+        newConfig.decisions.push(newDecision)
+        await saveConfig(newConfig)
+      }
+
+      openEditModal(
+        mode === 'add' ? 'Add Decision' : `Edit Decision: ${decision?.name}`,
+        initialData,
+        fields,
+        saveDecision,
+        mode
+      )
     }
 
-    // Handle delete decision (placeholder for now)
-    const handleDeleteDecision = (decision: DecisionRow) => {
-      if (confirm(`Are you sure you want to delete decision "${decision.name}"?`)) {
-        // TODO: Implement delete functionality
-        console.log('Delete decision:', decision)
-      }
+    const handleEditDecision = (decision: DecisionRow) => {
+      openDecisionEditor('edit', decision)
     }
 
     return (
@@ -2474,8 +3784,9 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
           searchPlaceholder="Search decisions..."
           searchValue={decisionsSearch}
           onSearchChange={setDecisionsSearch}
-          onAdd={() => console.log('Add decision')}
+          onAdd={() => openDecisionEditor('add')}
           addButtonText="Add Decision"
+          disabled={isReadonly}
         />
 
         {isPythonCLI ? (
@@ -2487,6 +3798,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             onEdit={handleEditDecision}
             onDelete={handleDeleteDecision}
             emptyMessage={decisionsSearch ? 'No decisions match your search' : 'No routing decisions configured'}
+            readonly={isReadonly}
           />
         ) : (
           <div className={styles.emptyState}>
@@ -2605,7 +3917,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
                 <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
                   <td style={{ padding: '0.75rem 0.5rem', fontSize: '0.875rem', fontWeight: 500 }}>{ep.name}</td>
                   <td style={{ padding: '0.75rem 0.5rem', fontSize: '0.875rem', fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)' }}>
-                    {ep.endpoint || 'N/A'}
+                    {isReadonly ? '************' : (ep.endpoint || 'N/A')}
                   </td>
                   <td style={{ padding: '0.75rem 0.5rem', textAlign: 'center' }}>
                     <span style={{
@@ -2680,7 +3992,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
                           color: 'var(--color-text-secondary)'
                         }}>
                           <span style={{ fontFamily: 'var(--font-mono)' }}>
-                            {ep.endpoint}
+                            {isReadonly ? '************' : ep.endpoint}
                           </span>
                           <span>
                             <span style={{
@@ -3173,9 +4485,10 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
           count={reasoningFamilyData.length}
           searchPlaceholder=""
           searchValue=""
-          onSearchChange={() => {}}
+          onSearchChange={() => { }}
           onAdd={handleAddReasoningFamily}
           addButtonText="Add Family"
+          disabled={isReadonly}
         />
 
         <DataTable
@@ -3186,6 +4499,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
           onEdit={(row) => handleEditReasoningFamily(row.name)}
           onDelete={(row) => handleDeleteReasoningFamily(row.name)}
           emptyMessage="No reasoning families configured"
+          readonly={isReadonly}
         />
 
         {/* Models Table */}
@@ -3198,6 +4512,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             onSearchChange={setModelsSearch}
             onAdd={handleAddModel}
             addButtonText="Add Model"
+            disabled={isReadonly}
           />
 
           <DataTable
@@ -3212,6 +4527,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
             isRowExpanded={(row) => expandedModels.has(row.name)}
             onToggleExpand={handleToggleExpand}
             emptyMessage={modelsSearch ? 'No models match your search' : 'No models configured'}
+            readonly={isReadonly}
           />
         </div>
       </div>
@@ -3230,6 +4546,9 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
 
       {/* Classifier */}
       {renderClassifyBERT()}
+
+      {/* Preference Model */}
+      {renderPreferenceModel()}
 
       {/* Tools */}
       {renderToolsConfiguration()}
@@ -3256,6 +4575,8 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
         return renderModelsSection()
       case 'router-config':
         return renderRouterConfigSection()
+      case 'mcp':
+        return <MCPConfigPanel />
       default:
         return renderSignalsSection()
     }
@@ -3263,7 +4584,6 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
 
   return (
     <div className={styles.container}>
-
       <div className={styles.content}>
         {loading && (
           <div className={styles.loading}>
@@ -3293,7 +4613,7 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
       <EditModal
         isOpen={editModalOpen}
         onClose={closeEditModal}
-        onSave={editModalCallback || (async () => {})}
+        onSave={editModalCallback || (async () => { })}
         title={editModalTitle}
         data={editModalData}
         fields={editModalFields}
@@ -3303,8 +4623,8 @@ const ConfigPage: React.FC<ConfigPageProps> = ({ activeSection = 'signals' }) =>
       {/* View Modal */}
       <ViewModal
         isOpen={viewModalOpen}
-        onClose={() => setViewModalOpen(false)}
-        onEdit={viewModalEditCallback || undefined}
+        onClose={handleCloseViewModal}
+        onEdit={isReadonly ? undefined : (viewModalEditCallback || undefined)}
         title={viewModalTitle}
         sections={viewModalSections}
       />

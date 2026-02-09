@@ -6,38 +6,20 @@ import (
 	"strings"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/memory"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/responseapi"
 )
 
-// extractAutoStore checks if auto_store is enabled in the request.
-//
-// auto_store must be explicitly set in the request body under memory_config.auto_store.
-// This is an opt-in feature - if not provided, memory extraction will not run.
-//
-// Example request with auto_store enabled:
-//
-//	{
-//	  "model": "qwen3",
-//	  "input": "What's my budget?",
-//	  "memory_config": {
-//	    "enabled": true,
-//	    "auto_store": true  // ← Must be set to true to enable automatic memory extraction
-//	  },
-//	  "memory_context": {
-//	    "user_id": "user_123"
-//	  }
-//	}
-//
-// Note: Only supported for Response API requests (/v1/responses).
-// Chat Completions API is stateless by design and doesn't support auto_store
-// because the router doesn't manage conversation history for Chat Completions.
+// extractAutoStore checks if auto_store is enabled.
+// Priority: per-decision plugin config > request-level memory_config.auto_store.
+// Only supported for Response API (Chat Completions is stateless).
 func extractAutoStore(ctx *RequestContext) bool {
-	// Check Response API request for memory_config.auto_store
-	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest {
-		if ctx.ResponseAPICtx.OriginalRequest != nil {
-			if ctx.ResponseAPICtx.OriginalRequest.MemoryConfig != nil {
-				return ctx.ResponseAPICtx.OriginalRequest.MemoryConfig.AutoStore
-			}
+	if ctx.VSRSelectedDecision != nil {
+		memoryPluginConfig := ctx.VSRSelectedDecision.GetMemoryConfig()
+		if memoryPluginConfig != nil && memoryPluginConfig.AutoStore != nil {
+			logging.Infof("extractAutoStore: Using per-decision plugin config, AutoStore=%v (decision: %s)",
+				*memoryPluginConfig.AutoStore, ctx.VSRSelectedDecisionName)
+			return *memoryPluginConfig.AutoStore
 		}
 	}
 
@@ -54,10 +36,8 @@ func extractAutoStore(ctx *RequestContext) bool {
 // (unretrievable) without a valid userID. Memory retrieval filters by userID first,
 // so memories stored without userID cannot be retrieved later.
 //
-// userID is required and must be provided via one of:
-//   - memory_context.user_id in Response API request (preferred)
-//   - metadata["user_id"] in Response API request
-//   - x-user-id header
+// userID is required and must be provided via:
+//   - metadata["user_id"] in Response API request (OpenAI API spec-compliant)
 func extractMemoryInfo(ctx *RequestContext) (sessionID string, userID string, history []memory.Message, err error) {
 	// First check if this is a Response API request
 	// Non-Response API requests cannot track turns without ConversationID
@@ -66,24 +46,12 @@ func extractMemoryInfo(ctx *RequestContext) (sessionID string, userID string, hi
 	}
 
 	// Extract userID (required for memory extraction)
+	// userID is provided via metadata.user_id (OpenAI API spec-compliant)
 	if ctx.ResponseAPICtx.OriginalRequest != nil {
-		// First, check MemoryContext (preferred method according to POC)
-		if ctx.ResponseAPICtx.OriginalRequest.MemoryContext != nil {
-			userID = ctx.ResponseAPICtx.OriginalRequest.MemoryContext.UserID
-		}
-
-		// Fallback: check metadata for user_id
-		if userID == "" && ctx.ResponseAPICtx.OriginalRequest.Metadata != nil {
+		if ctx.ResponseAPICtx.OriginalRequest.Metadata != nil {
 			if uid, ok := ctx.ResponseAPICtx.OriginalRequest.Metadata["user_id"]; ok {
 				userID = uid
 			}
-		}
-	}
-
-	// Fallback: check headers
-	if userID == "" {
-		if uid, ok := ctx.Headers["x-user-id"]; ok {
-			userID = uid
 		}
 	}
 
@@ -92,38 +60,22 @@ func extractMemoryInfo(ctx *RequestContext) (sessionID string, userID string, hi
 	// Check this early to avoid unnecessary sessionID calculation
 	if userID == "" {
 		// Extract history for error context (even though we'll return error)
-		var history []memory.Message
 		if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.ConversationHistory != nil {
 			history = convertStoredResponsesToMessages(ctx.ResponseAPICtx.ConversationHistory)
 		}
-		return "", "", history, fmt.Errorf("userID is required for memory extraction but not provided. Please provide memory_context.user_id in the request, or set metadata[\"user_id\"], or include x-user-id header")
+		return "", "", history, fmt.Errorf("userID is required for memory extraction but not provided. Please set metadata[\"user_id\"] in the request")
 	}
 
-	// Extract sessionID (ConversationID) for turnCounts tracking
-	// Memory extraction requires ConversationID to track turns correctly per conversation.
-	// Without ConversationID, turnCounts would leak across conversations for the same user.
+	// Extract sessionID (ConversationID) for turnCounts tracking.
+	// ConversationID is determined early during TranslateRequest and stored in context.
+	// This ensures consistent tracking across the entire request lifecycle.
 	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest {
-		// Case 1: Request provided ConversationID
-		if ctx.ResponseAPICtx.OriginalRequest != nil && ctx.ResponseAPICtx.OriginalRequest.ConversationID != "" {
-			sessionID = ctx.ResponseAPICtx.OriginalRequest.ConversationID
-		} else if ctx.ResponseAPICtx.ConversationHistory != nil && len(ctx.ResponseAPICtx.ConversationHistory) > 0 {
-			// Case 2: No ConversationID in request, but has PreviousResponseID (continuation)
-			// Find ConversationID from the first response in the chain
-			firstResponse := ctx.ResponseAPICtx.ConversationHistory[0]
-			if firstResponse.ConversationID != "" {
-				sessionID = firstResponse.ConversationID
-			}
-		}
+		sessionID = ctx.ResponseAPICtx.ConversationID
+	}
 
-		// Case 3: No ConversationID and no PreviousResponseID (new conversation)
-		// Generate a new ConversationID
-		if sessionID == "" {
-			sessionID = responseapi.GenerateConversationID()
-			// Store in context so we can use it in the response
-			if ctx.ResponseAPICtx != nil {
-				ctx.ResponseAPICtx.GeneratedConversationID = sessionID
-			}
-		}
+	// Safety check: ConversationID should always be set by TranslateRequest
+	if sessionID == "" {
+		return "", "", nil, fmt.Errorf("ConversationID not set in context - this should not happen")
 	}
 
 	// Extract history from ResponseAPIContext
@@ -227,4 +179,64 @@ func extractTextFromContentParts(parts []responseapi.ContentPart) string {
 		}
 	}
 	return text.String()
+}
+
+// extractCurrentUserMessage extracts the current user message from the request context.
+// This is used to include the current turn in memory extraction.
+func extractCurrentUserMessage(ctx *RequestContext) string {
+	if ctx.ResponseAPICtx == nil || ctx.ResponseAPICtx.OriginalRequest == nil {
+		return ""
+	}
+
+	// Response API: input is json.RawMessage, try to parse as string
+	input := ctx.ResponseAPICtx.OriginalRequest.Input
+	if len(input) == 0 {
+		return ""
+	}
+
+	// Try parsing as a simple string first
+	var inputStr string
+	if err := json.Unmarshal(input, &inputStr); err == nil {
+		return inputStr
+	}
+
+	// Fallback: return raw JSON as string (for complex input types)
+	return string(input)
+}
+
+// extractAssistantResponseText extracts the assistant's response text from the LLM response body.
+// Supports OpenAI Chat Completions format.
+func extractAssistantResponseText(responseBody []byte) string {
+	if len(responseBody) == 0 {
+		return ""
+	}
+
+	// Try to parse as OpenAI Chat Completions response
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+
+	if err := json.Unmarshal(responseBody, &chatResp); err != nil {
+		logging.Debugf("extractAssistantResponseText: failed to parse response: %v", err)
+		return ""
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return ""
+	}
+
+	// Try message.content first, then delta.content (for streaming)
+	content := chatResp.Choices[0].Message.Content
+	if content == "" {
+		content = chatResp.Choices[0].Delta.Content
+	}
+
+	return content
 }

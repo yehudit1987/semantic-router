@@ -1,18 +1,21 @@
 package extproc
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/memory"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/responseapi"
 )
 
 // extractAutoStore checks if auto_store is enabled.
-// Priority: per-decision plugin config > request-level memory_config.auto_store.
-// Only supported for Response API (Chat Completions is stateless).
+// Priority: per-decision plugin config > global config.
+// Supported for both Response API and Chat Completions (when messages are available).
 func extractAutoStore(ctx *RequestContext) bool {
 	if ctx.VSRSelectedDecision != nil {
 		memoryPluginConfig := ctx.VSRSelectedDecision.GetMemoryConfig()
@@ -23,67 +26,156 @@ func extractAutoStore(ctx *RequestContext) bool {
 		}
 	}
 
-	// Chat Completions API is stateless by design and doesn't support auto_store.
-	// The router doesn't manage conversation history for Chat Completions requests,
-	// so there's no history to extract memories from. Only Response API supports
-	// auto_store because it maintains conversation history.
+	// Check if we have history to extract from (Response API or Chat Completions)
+	hasHistory := (ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest) ||
+		len(ctx.ChatCompletionMessages) > 0
+	if !hasHistory {
+		return false
+	}
+
+	// Default: auto_store disabled unless explicitly enabled via plugin config
 	return false
 }
 
+// ExtractUserIDSecure extracts user ID with priority: auth header > metadata > Chat Completions user field.
+// Returns error if RequireAuthHeader is true but header is missing.
+func ExtractUserIDSecure(ctx *RequestContext, memoryCfg *config.MemoryConfig) (string, error) {
+	// Check auth header first (trusted source)
+	if memoryCfg != nil && memoryCfg.AuthUserIDHeader != "" {
+		headerName := strings.ToLower(memoryCfg.AuthUserIDHeader)
+		if userID, ok := ctx.Headers[headerName]; ok && userID != "" {
+			logging.Debugf("Memory: Using user_id from auth header '%s'", memoryCfg.AuthUserIDHeader)
+			return userID, nil
+		}
+		// Also try exact case match
+		if userID, ok := ctx.Headers[memoryCfg.AuthUserIDHeader]; ok && userID != "" {
+			logging.Debugf("Memory: Using user_id from auth header '%s'", memoryCfg.AuthUserIDHeader)
+			return userID, nil
+		}
+
+		// Auth header configured but not present
+		if memoryCfg.RequireAuthHeader {
+			return "", fmt.Errorf("auth header '%s' is required but not present in request. "+
+				"Ensure your auth layer injects this header, or set require_auth_header: false for development",
+				memoryCfg.AuthUserIDHeader)
+		}
+		logging.Debugf("Memory: Auth header '%s' not found, falling back to metadata/user field", memoryCfg.AuthUserIDHeader)
+	}
+
+	// Fallback to Response API metadata["user_id"]
+	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.OriginalRequest != nil {
+		if ctx.ResponseAPICtx.OriginalRequest.Metadata != nil {
+			if userID, ok := ctx.ResponseAPICtx.OriginalRequest.Metadata["user_id"]; ok && userID != "" {
+				logging.Debugf("Memory: Using user_id from Response API metadata (untrusted)")
+				return userID, nil
+			}
+		}
+	}
+
+	// Fallback to Chat Completions "user" field
+	if ctx.ChatCompletionUserID != "" {
+		logging.Debugf("Memory: Using user_id from Chat Completions 'user' field (untrusted)")
+		return ctx.ChatCompletionUserID, nil
+	}
+
+	return "", nil
+}
+
 // extractMemoryInfo extracts sessionID, userID, and history from the request context.
+// Supports both Response API and Chat Completions API.
 //
 // Returns an error if userID is not available, because memory would be orphaned
 // (unretrievable) without a valid userID. Memory retrieval filters by userID first,
 // so memories stored without userID cannot be retrieved later.
 //
-// userID is required and must be provided via:
-//   - metadata["user_id"] in Response API request (OpenAI API spec-compliant)
-func extractMemoryInfo(ctx *RequestContext) (sessionID string, userID string, history []memory.Message, err error) {
-	// First check if this is a Response API request
-	// Non-Response API requests cannot track turns without ConversationID
-	if ctx.ResponseAPICtx == nil || !ctx.ResponseAPICtx.IsResponseAPIRequest {
-		return "", "", nil, fmt.Errorf("ConversationID required for memory extraction - cannot track turns without it. Please use Response API (/v1/responses) with conversation_id or previous_response_id")
+// userID extraction priority:
+//  1. Auth header (if configured via memory.auth_user_id_header)
+//  2. Response API metadata["user_id"] or Chat Completions "user" field
+func extractMemoryInfo(ctx *RequestContext, memoryCfg *config.MemoryConfig) (sessionID string, userID string, history []memory.Message, err error) {
+	// Determine API type and extract accordingly
+	isResponseAPI := ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest
+	isChatCompletions := len(ctx.ChatCompletionMessages) > 0
+
+	if !isResponseAPI && !isChatCompletions {
+		return "", "", nil, fmt.Errorf("no conversation history available for memory extraction. " +
+			"Use Response API (/v1/responses) or Chat Completions (/v1/chat/completions) with messages")
 	}
 
-	// Extract userID (required for memory extraction)
-	// userID is provided via metadata.user_id (OpenAI API spec-compliant)
-	if ctx.ResponseAPICtx.OriginalRequest != nil {
-		if ctx.ResponseAPICtx.OriginalRequest.Metadata != nil {
-			if uid, ok := ctx.ResponseAPICtx.OriginalRequest.Metadata["user_id"]; ok {
-				userID = uid
-			}
-		}
+	// Extract userID using secure extraction (checks auth header first)
+	userID, err = ExtractUserIDSecure(ctx, memoryCfg)
+	if err != nil {
+		return "", "", nil, err
 	}
 
 	// Require userID - without it, memory would be orphaned (unretrievable)
-	// because memory retrieval filters by userID first
-	// Check this early to avoid unnecessary sessionID calculation
 	if userID == "" {
-		// Extract history for error context (even though we'll return error)
-		if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.ConversationHistory != nil {
+		// Extract history for error context
+		if isResponseAPI && ctx.ResponseAPICtx.ConversationHistory != nil {
+			history = convertStoredResponsesToMessages(ctx.ResponseAPICtx.ConversationHistory)
+		} else if isChatCompletions {
+			history = convertChatCompletionMessages(ctx.ChatCompletionMessages)
+		}
+		return "", "", history, fmt.Errorf("userID is required for memory extraction but not provided. " +
+			"Please set metadata[\"user_id\"] (Response API), \"user\" field (Chat Completions), " +
+			"or configure auth_user_id_header in memory config")
+	}
+
+	// Extract sessionID and history based on API type
+	if isResponseAPI {
+		sessionID = ctx.ResponseAPICtx.ConversationID
+		if sessionID == "" {
+			return "", "", nil, fmt.Errorf("ConversationID not set in Response API context")
+		}
+		if ctx.ResponseAPICtx.ConversationHistory != nil {
 			history = convertStoredResponsesToMessages(ctx.ResponseAPICtx.ConversationHistory)
 		}
-		return "", "", history, fmt.Errorf("userID is required for memory extraction but not provided. Please set metadata[\"user_id\"] in the request")
-	}
-
-	// Extract sessionID (ConversationID) for turnCounts tracking.
-	// ConversationID is determined early during TranslateRequest and stored in context.
-	// This ensures consistent tracking across the entire request lifecycle.
-	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.IsResponseAPIRequest {
-		sessionID = ctx.ResponseAPICtx.ConversationID
-	}
-
-	// Safety check: ConversationID should always be set by TranslateRequest
-	if sessionID == "" {
-		return "", "", nil, fmt.Errorf("ConversationID not set in context - this should not happen")
-	}
-
-	// Extract history from ResponseAPIContext
-	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.ConversationHistory != nil {
-		history = convertStoredResponsesToMessages(ctx.ResponseAPICtx.ConversationHistory)
+	} else if isChatCompletions {
+		// For Chat Completions, derive sessionID from conversation hash
+		// This groups related conversations for turn counting
+		sessionID = deriveSessionIDFromMessages(ctx.ChatCompletionMessages, userID)
+		history = convertChatCompletionMessages(ctx.ChatCompletionMessages)
 	}
 
 	return sessionID, userID, history, nil
+}
+
+// deriveSessionIDFromMessages creates a session ID from Chat Completions messages.
+// Uses a hash of the first few messages + userID to group related conversations.
+func deriveSessionIDFromMessages(messages []ChatCompletionMessage, userID string) string {
+	// Use first message content + userID to create a stable session ID
+	// This allows tracking turns within the same "conversation topic"
+	var builder strings.Builder
+	builder.WriteString(userID)
+	builder.WriteString(":")
+
+	// Include first user message to identify the conversation topic
+	for _, msg := range messages {
+		if msg.Role == "user" {
+			// Truncate to first 100 chars to keep hash stable for long messages
+			content := msg.Content
+			if len(content) > 100 {
+				content = content[:100]
+			}
+			builder.WriteString(content)
+			break
+		}
+	}
+
+	// Create SHA256 hash and take first 16 chars
+	hash := sha256.Sum256([]byte(builder.String()))
+	return "cc-" + hex.EncodeToString(hash[:])[:16]
+}
+
+// convertChatCompletionMessages converts ChatCompletionMessage[] to memory.Message[].
+func convertChatCompletionMessages(messages []ChatCompletionMessage) []memory.Message {
+	result := make([]memory.Message, 0, len(messages))
+	for _, msg := range messages {
+		result = append(result, memory.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+	return result
 }
 
 // convertStoredResponsesToMessages converts StoredResponse[] to Message[].
@@ -182,26 +274,33 @@ func extractTextFromContentParts(parts []responseapi.ContentPart) string {
 }
 
 // extractCurrentUserMessage extracts the current user message from the request context.
-// This is used to include the current turn in memory extraction.
+// Supports both Response API and Chat Completions.
 func extractCurrentUserMessage(ctx *RequestContext) string {
-	if ctx.ResponseAPICtx == nil || ctx.ResponseAPICtx.OriginalRequest == nil {
-		return ""
+	// Response API: extract from OriginalRequest.Input
+	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.OriginalRequest != nil {
+		input := ctx.ResponseAPICtx.OriginalRequest.Input
+		if len(input) > 0 {
+			// Try parsing as a simple string first
+			var inputStr string
+			if err := json.Unmarshal(input, &inputStr); err == nil {
+				return inputStr
+			}
+			// Fallback: return raw JSON as string
+			return string(input)
+		}
 	}
 
-	// Response API: input is json.RawMessage, try to parse as string
-	input := ctx.ResponseAPICtx.OriginalRequest.Input
-	if len(input) == 0 {
-		return ""
+	// Chat Completions: extract last user message
+	if len(ctx.ChatCompletionMessages) > 0 {
+		// Find the last user message (current turn)
+		for i := len(ctx.ChatCompletionMessages) - 1; i >= 0; i-- {
+			if ctx.ChatCompletionMessages[i].Role == "user" {
+				return ctx.ChatCompletionMessages[i].Content
+			}
+		}
 	}
 
-	// Try parsing as a simple string first
-	var inputStr string
-	if err := json.Unmarshal(input, &inputStr); err == nil {
-		return inputStr
-	}
-
-	// Fallback: return raw JSON as string (for complex input types)
-	return string(input)
+	return ""
 }
 
 // extractAssistantResponseText extracts the assistant's response text from the LLM response body.

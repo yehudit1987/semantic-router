@@ -2,6 +2,7 @@ package extproc
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -189,7 +190,7 @@ func TestExtractMemoryInfo_WithConversationID(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.NoError(t, err, "should not return error when userID is provided")
 	assert.Equal(t, "conv_456", sessionID, "should use ConversationID from context")
@@ -215,7 +216,7 @@ func TestExtractMemoryInfo_WithoutConversationID_WithUserID(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.NoError(t, err, "should not return error when userID is provided")
 	assert.Equal(t, "conv_generated_by_translate", sessionID, "should use ConversationID from context")
@@ -238,7 +239,7 @@ func TestExtractMemoryInfo_UserIDFromMetadata(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.NoError(t, err, "should not return error when userID is provided")
 	assert.Equal(t, "conv_from_translate", sessionID, "should use ConversationID from context")
@@ -263,7 +264,7 @@ func TestExtractMemoryInfo_HeadersNotSupported(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.Error(t, err, "should return error when userID is only in headers (not supported)")
 	assert.Contains(t, err.Error(), "userID is required", "error should mention userID requirement")
@@ -286,7 +287,7 @@ func TestExtractMemoryInfo_MissingUserID(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.Error(t, err, "should return error when userID is missing")
 	assert.Contains(t, err.Error(), "userID is required", "error message should mention userID requirement")
@@ -342,7 +343,7 @@ func TestExtractMemoryInfo_ContinuationFromChain(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.NoError(t, err, "should not return error when userID is provided")
 	assert.Equal(t, "conv_existing", sessionID, "should use ConversationID from context (found from chain)")
@@ -392,7 +393,7 @@ func TestExtractMemoryInfo_WithConversationHistory(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.NoError(t, err, "should not return error when userID is provided")
 	assert.Equal(t, "conv_456", sessionID)
@@ -416,20 +417,20 @@ func TestExtractMemoryInfo_WithConversationHistory(t *testing.T) {
 	assert.Equal(t, "Your budget is $10,000", history[3].Content)
 }
 
-func TestExtractMemoryInfo_NonResponseAPI(t *testing.T) {
+func TestExtractMemoryInfo_NoHistoryAvailable(t *testing.T) {
 	ctx := &RequestContext{
-		RequestID:      "req_123",
-		ResponseAPICtx: nil, // Not a Response API request
+		RequestID:              "req_123",
+		ResponseAPICtx:         nil, // Not a Response API request
+		ChatCompletionMessages: nil, // No Chat Completions messages either
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
-	require.Error(t, err, "should return error for non-Response API request")
-	// For non-Response API, we check ConversationID requirement first (before userID)
-	// because we can't track turns without ConversationID
-	assert.Contains(t, err.Error(), "ConversationID required", "error message should mention ConversationID requirement for non-Response API")
-	assert.Empty(t, sessionID, "should return empty sessionID for non-Response API request")
-	assert.Empty(t, userID, "should return empty userID for non-Response API request")
+	require.Error(t, err, "should return error when no history available")
+	// Now supports both Response API and Chat Completions
+	assert.Contains(t, err.Error(), "no conversation history available", "error should indicate no history available")
+	assert.Empty(t, sessionID)
+	assert.Empty(t, userID)
 	assert.Empty(t, history)
 }
 
@@ -873,7 +874,7 @@ func TestExtractMemoryInfo_RealisticScenario(t *testing.T) {
 		},
 	}
 
-	sessionID, userID, history, err := extractMemoryInfo(ctx)
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
 
 	require.NoError(t, err, "should not return error when userID is provided")
 	assert.Equal(t, "conv_hawaii_trip", sessionID)
@@ -887,4 +888,137 @@ func TestExtractMemoryInfo_RealisticScenario(t *testing.T) {
 	assert.Equal(t, "Perfect! With $10,000 you can have an amazing trip to Hawaii.", history[3].Content)
 	assert.Equal(t, "What did I say my budget was?", history[4].Content)
 	assert.Equal(t, "You said your budget is $10,000 for the Hawaii trip.", history[5].Content)
+}
+
+// ============================================================================
+// Chat Completions Memory Extraction Tests
+// ============================================================================
+
+func TestExtractMemoryInfo_ChatCompletions_Success(t *testing.T) {
+	ctx := &RequestContext{
+		ChatCompletionMessages: []ChatCompletionMessage{
+			{Role: "system", Content: "You are a helpful assistant"},
+			{Role: "user", Content: "Hello, my name is Alice"},
+			{Role: "assistant", Content: "Hello Alice! How can I help you today?"},
+			{Role: "user", Content: "What's my name?"},
+		},
+		ChatCompletionUserID: "user_alice",
+	}
+
+	sessionID, userID, history, err := extractMemoryInfo(ctx, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "user_alice", userID)
+	assert.NotEmpty(t, sessionID, "sessionID should be derived from messages")
+	assert.True(t, strings.HasPrefix(sessionID, "cc-"), "Chat Completions sessionID should have 'cc-' prefix")
+	require.Len(t, history, 4)
+	assert.Equal(t, "system", history[0].Role)
+	assert.Equal(t, "user", history[1].Role)
+	assert.Equal(t, "Hello, my name is Alice", history[1].Content)
+}
+
+func TestExtractMemoryInfo_ChatCompletions_NoUserID(t *testing.T) {
+	ctx := &RequestContext{
+		ChatCompletionMessages: []ChatCompletionMessage{
+			{Role: "user", Content: "Hello"},
+		},
+		// No ChatCompletionUserID set
+	}
+
+	_, _, history, err := extractMemoryInfo(ctx, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "userID is required")
+	assert.Len(t, history, 1, "should return history even on error")
+}
+
+func TestExtractMemoryInfo_ChatCompletions_AuthHeader(t *testing.T) {
+	ctx := &RequestContext{
+		Headers: map[string]string{
+			"x-authenticated-user-id": "auth_user_123",
+		},
+		ChatCompletionMessages: []ChatCompletionMessage{
+			{Role: "user", Content: "Hello"},
+		},
+		ChatCompletionUserID: "untrusted_user", // Should be ignored
+	}
+
+	memoryCfg := &config.MemoryConfig{
+		AuthUserIDHeader: "x-authenticated-user-id",
+	}
+
+	_, userID, _, err := extractMemoryInfo(ctx, memoryCfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, "auth_user_123", userID, "should use auth header over user field")
+}
+
+func TestExtractMemoryInfo_ChatCompletions_RequireAuthHeader(t *testing.T) {
+	ctx := &RequestContext{
+		Headers: map[string]string{},
+		ChatCompletionMessages: []ChatCompletionMessage{
+			{Role: "user", Content: "Hello"},
+		},
+		ChatCompletionUserID: "user_123",
+	}
+
+	memoryCfg := &config.MemoryConfig{
+		AuthUserIDHeader:  "x-authenticated-user-id",
+		RequireAuthHeader: true,
+	}
+
+	_, _, _, err := extractMemoryInfo(ctx, memoryCfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth header")
+	assert.Contains(t, err.Error(), "required")
+}
+
+func TestExtractCurrentUserMessage_ChatCompletions(t *testing.T) {
+	ctx := &RequestContext{
+		ChatCompletionMessages: []ChatCompletionMessage{
+			{Role: "user", Content: "First message"},
+			{Role: "assistant", Content: "Response"},
+			{Role: "user", Content: "Last user message"},
+		},
+	}
+
+	result := extractCurrentUserMessage(ctx)
+
+	assert.Equal(t, "Last user message", result, "should return last user message")
+}
+
+func TestConvertChatCompletionMessages(t *testing.T) {
+	messages := []ChatCompletionMessage{
+		{Role: "system", Content: "System prompt"},
+		{Role: "user", Content: "User input"},
+		{Role: "assistant", Content: "Assistant output"},
+	}
+
+	result := convertChatCompletionMessages(messages)
+
+	require.Len(t, result, 3)
+	assert.Equal(t, "system", result[0].Role)
+	assert.Equal(t, "System prompt", result[0].Content)
+	assert.Equal(t, "user", result[1].Role)
+	assert.Equal(t, "assistant", result[2].Role)
+}
+
+func TestDeriveSessionIDFromMessages(t *testing.T) {
+	messages := []ChatCompletionMessage{
+		{Role: "user", Content: "Hello, I need help with my order"},
+	}
+
+	sessionID1 := deriveSessionIDFromMessages(messages, "user_123")
+	sessionID2 := deriveSessionIDFromMessages(messages, "user_123")
+	sessionID3 := deriveSessionIDFromMessages(messages, "user_456")
+
+	// Same messages + same user = same session ID
+	assert.Equal(t, sessionID1, sessionID2)
+
+	// Same messages + different user = different session ID
+	assert.NotEqual(t, sessionID1, sessionID3)
+
+	// All session IDs should have the prefix
+	assert.True(t, strings.HasPrefix(sessionID1, "cc-"))
 }

@@ -800,6 +800,13 @@ type MemoryConfig struct {
 	// Default: 0.6
 	DefaultSimilarityThreshold float32 `yaml:"default_similarity_threshold,omitempty"`
 
+	// AuthUserIDHeader is the header containing authenticated user ID (e.g., "x-authenticated-user-id").
+	// Takes precedence over metadata["user_id"] when set.
+	AuthUserIDHeader string `yaml:"auth_user_id_header,omitempty"`
+
+	// RequireAuthHeader rejects requests without AuthUserIDHeader. Default: false.
+	RequireAuthHeader bool `yaml:"require_auth_header,omitempty"`
+
 	// Note: Query rewriting and fact extraction are enabled by defining
 	// external_models with model_role="memory_rewrite" or "memory_extraction".
 	// Use FindExternalModelByRole() to check if enabled and get config.

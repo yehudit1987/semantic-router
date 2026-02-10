@@ -137,6 +137,17 @@ type RequestContext struct {
 	// Memory retrieval tracking
 	// Stores formatted memory context to be injected after system prompt
 	MemoryContext string // Formatted memory context (empty if no memories retrieved)
+
+	// Chat Completions memory support
+	// Stores parsed messages for memory extraction (Chat Completions provides full history)
+	ChatCompletionMessages []ChatCompletionMessage // Parsed messages from Chat Completions request
+	ChatCompletionUserID   string                  // User ID from Chat Completions "user" field
+}
+
+// ChatCompletionMessage represents a message from Chat Completions for memory extraction.
+type ChatCompletionMessage struct {
+	Role    string // "user", "assistant", "system"
+	Content string // Text content of the message
 }
 
 // handleRequestHeaders processes the request headers

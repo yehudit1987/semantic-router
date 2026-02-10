@@ -230,11 +230,16 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 		// Capture current turn for extraction (must be done before goroutine)
 		currentUserMessage := extractCurrentUserMessage(ctx)
 		currentAssistantResponse := extractAssistantResponseText(responseBody)
+		// Capture memory config before goroutine to avoid race conditions
+		var memoryCfg *config.MemoryConfig
+		if r.Config != nil {
+			memoryCfg = &r.Config.Memory
+		}
 		go func() {
 			// Use a background context for the goroutine to ensure it runs to completion
 			// even if the original request context is cancelled.
 			bgCtx := context.Background()
-			sessionID, userID, history, err := extractMemoryInfo(ctx)
+			sessionID, userID, history, err := extractMemoryInfo(ctx, memoryCfg)
 			// extractMemoryInfo returns error if userID is missing (required for memory extraction)
 			if err != nil {
 				logging.Errorf("Memory extraction failed: %v", err)

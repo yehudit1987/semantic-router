@@ -25,6 +25,7 @@ import (
 
 // handleRequestBody processes the request body
 func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+	logging.Infof("Processing request body: %s", string(v.RequestBody.GetBody()))
 	// Record start time for model routing
 	ctx.ProcessingStartTime = time.Now()
 	// Save the original request body
@@ -89,6 +90,13 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 
 	// Store user content for later use in hallucination detection
 	ctx.UserContent = userContent
+
+	// Store Chat Completion messages for memory extraction (if not Response API)
+	// Response API has its own conversation history via previous_response_id chain
+	if ctx.ResponseAPICtx == nil || !ctx.ResponseAPICtx.IsResponseAPIRequest {
+		ctx.ChatCompletionMessages = extractChatCompletionMessages(openAIRequest)
+		ctx.ChatCompletionUserID = extractChatCompletionUserID(requestBody)
+	}
 
 	// Perform decision evaluation and model selection once at the beginning
 	// Use decision-based routing if decisions are configured, otherwise fall back to category-based
@@ -816,17 +824,27 @@ func (r *OpenAIRouter) getMemoryStore() *memory.MilvusStore {
 	return r.MemoryStore
 }
 
-// getUserIDFromContext extracts user ID from Response API context or request.
+// getUserIDFromContext extracts user ID from trusted sources with security controls.
+//
+// Priority order:
+//  1. Auth header (trusted, injected by upstream auth layer)
+//  2. Response API metadata["user_id"] (if require_auth_header is false)
+//  3. Chat Completions "user" field (if require_auth_header is false)
+//
+// Returns empty string if user ID not found (or error if RequireAuthHeader is true but header missing).
 func (r *OpenAIRouter) getUserIDFromContext(ctx *RequestContext) string {
-	// Check Response API context first
-	// userID is provided via metadata.user_id (OpenAI API spec-compliant)
-	if ctx.ResponseAPICtx != nil && ctx.ResponseAPICtx.OriginalRequest != nil {
-		if ctx.ResponseAPICtx.OriginalRequest.Metadata != nil {
-			if userID, ok := ctx.ResponseAPICtx.OriginalRequest.Metadata["user_id"]; ok {
-				return userID
-			}
-		}
+	// Use secure extraction with memory config
+	var memoryCfg *config.MemoryConfig
+	if r.Config != nil {
+		memoryCfg = &r.Config.Memory
 	}
 
-	return ""
+	userID, err := ExtractUserIDSecure(ctx, memoryCfg)
+	if err != nil {
+		// Log error but return empty string (caller handles missing userID)
+		logging.Warnf("Memory: User ID extraction error: %v", err)
+		return ""
+	}
+
+	return userID
 }

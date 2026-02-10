@@ -29,6 +29,7 @@ import (
 
 // handleRequestBody processes the request body
 func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBody, ctx *RequestContext) (*ext_proc.ProcessingResponse, error) {
+	logging.Infof("Processing request body: %s", string(v.RequestBody.GetBody()))
 	// Record start time for model routing
 	ctx.ProcessingStartTime = time.Now()
 	// Save the original request body
@@ -93,6 +94,16 @@ func (r *OpenAIRouter) handleRequestBody(v *ext_proc.ProcessingRequest_RequestBo
 
 	// Store user content for later use in hallucination detection
 	ctx.UserContent = userContent
+
+	// Store Chat Completion messages for memory extraction (if not Response API)
+	// Response API has its own conversation history via previous_response_id chain
+	if ctx.ResponseAPICtx == nil || !ctx.ResponseAPICtx.IsResponseAPIRequest {
+		ctx.ChatCompletionMessages = extractChatCompletionMessages(openAIRequest)
+		// Note: ChatCompletionUserID extraction is handled in user_id_dev.go for dev builds only.
+		// In production, user ID comes ONLY from the trusted auth header (x-authz-user-id).
+		// We store the raw request body to allow dev builds to extract it later.
+		ctx.ChatCompletionRequestBody = requestBody
+	}
 
 	// Perform decision evaluation and model selection once at the beginning
 	// Use decision-based routing if decisions are configured, otherwise fall back to category-based

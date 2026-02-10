@@ -253,6 +253,196 @@ class MilvusVerifier:
         return self.client is not None
 
 
+class ConversationHelper:
+    """Helper to manage conversations for both Response API and Chat Completions.
+
+    Abstracts away the differences between:
+    - Response API: Server manages history via previous_response_id
+    - Chat Completions: Client builds full messages[] array
+
+    Usage:
+        conv = ConversationHelper(api_type="response")  # or "chat"
+        response = conv.send_message("Hello", user_id="user123")
+        response = conv.send_message("How are you?", user_id="user123")
+    """
+
+    def __init__(
+        self, api_type="response", router_endpoint="http://localhost:8888", timeout=120
+    ):
+        """Initialize conversation helper.
+
+        Args:
+            api_type: Either "response" for Response API or "chat" for Chat Completions
+            router_endpoint: Base URL for the router
+            timeout: Request timeout in seconds
+        """
+        self.api_type = api_type
+        self.router_endpoint = router_endpoint
+        self.timeout = timeout
+
+        # API-specific URLs
+        self.responses_url = f"{router_endpoint}/v1/responses"
+        self.chat_url = f"{router_endpoint}/v1/chat/completions"
+
+        # State tracking
+        if api_type == "response":
+            self.state = {}  # Will store response_id
+        else:  # chat
+            self.state = {"messages": []}  # Accumulate all messages
+
+    def send_message(
+        self,
+        message: str,
+        user_id: str,
+        auto_store: bool = False,
+        verbose: bool = False,
+        model: str = "MoM",
+    ) -> Optional[str]:
+        """Send a message and return the assistant's response text.
+
+        Args:
+            message: User message text
+            user_id: User ID for memory isolation
+            auto_store: Enable auto-store (for Response API metadata)
+            verbose: Print request/response details
+            model: Model to use
+
+        Returns:
+            Assistant's response text, or None on error
+        """
+        if self.api_type == "response":
+            return self._send_response_api(message, user_id, auto_store, verbose, model)
+        else:
+            return self._send_chat_completions(message, user_id, verbose, model)
+
+    def _send_response_api(
+        self, message: str, user_id: str, auto_store: bool, verbose: bool, model: str
+    ) -> Optional[str]:
+        """Send message via Response API."""
+        payload = {
+            "model": model,
+            "input": message,
+            "instructions": "You are a helpful assistant with memory.",
+            "metadata": {"user_id": user_id},
+        }
+
+        # Chain conversation if we have a previous response
+        if "response_id" in self.state:
+            payload["previous_response_id"] = self.state["response_id"]
+
+        if verbose:
+            print(f"\n📤 [Response API] Request (user: {user_id}):")
+            print(f"   Message: {message[:100]}{'...' if len(message) > 100 else ''}")
+            if "response_id" in self.state:
+                print(f"   Previous ID: {self.state['response_id'][:20]}...")
+
+        try:
+            response = requests.post(
+                self.responses_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-authz-user-id": user_id,
+                },
+                timeout=self.timeout,
+            )
+
+            if response.status_code != 200:
+                print(f"❌ Request failed with status {response.status_code}")
+                print(f"   Response: {response.text[:500]}")
+                return None
+
+            result = response.json()
+
+            # Extract response text
+            output_text = result.get("output_text", "")
+            if not output_text:
+                output = result.get("output", [])
+                if output and isinstance(output, list):
+                    first_output = output[0]
+                    content = first_output.get("content", [])
+                    if content and isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and "text" in part:
+                                output_text = part["text"]
+                                break
+
+            # Update state with response ID for chaining
+            self.state["response_id"] = result.get("id")
+
+            if verbose:
+                print(
+                    f"📥 Response: {output_text[:200]}{'...' if len(output_text) > 200 else ''}"
+                )
+
+            return output_text
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Request error: {e}")
+            return None
+
+    def _send_chat_completions(
+        self, message: str, user_id: str, verbose: bool, model: str
+    ) -> Optional[str]:
+        """Send message via Chat Completions API."""
+        # Add user message to history
+        self.state["messages"].append({"role": "user", "content": message})
+
+        payload = {
+            "model": model,
+            "messages": self.state["messages"],
+            "metadata": {"user_id": user_id},
+        }
+
+        if verbose:
+            print(f"\n📤 [Chat Completions] Request (user: {user_id}):")
+            print(f"   Message: {message[:100]}{'...' if len(message) > 100 else ''}")
+            print(f"   Messages in history: {len(self.state['messages'])}")
+
+        try:
+            response = requests.post(
+                self.chat_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-authz-user-id": user_id,
+                },
+                timeout=self.timeout,
+            )
+
+            if response.status_code != 200:
+                print(f"❌ Request failed with status {response.status_code}")
+                print(f"   Response: {response.text[:500]}")
+                return None
+
+            result = response.json()
+
+            # Extract assistant response
+            assistant_msg = (
+                result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            )
+
+            # Add assistant response to history
+            self.state["messages"].append(
+                {"role": "assistant", "content": assistant_msg}
+            )
+
+            if verbose:
+                print(
+                    f"📥 Response: {assistant_msg[:200]}{'...' if len(assistant_msg) > 200 else ''}"
+                )
+
+            return assistant_msg
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Request error: {e}")
+            return None
+
+    def get_api_type(self) -> str:
+        """Return the API type being used."""
+        return self.api_type
+
+
 class MemoryFeaturesTest(SemanticRouterTestBase):
     """Test suite for memory features."""
 
@@ -262,6 +452,7 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
             "ROUTER_ENDPOINT", "http://localhost:8888"
         )
         self.responses_url = f"{self.router_endpoint}/v1/responses"
+        self.chat_url = f"{self.router_endpoint}/v1/chat/completions"
         self.timeout = 120  # Longer timeout for memory operations
 
         # Test user for this suite
@@ -276,6 +467,21 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
         milvus_collection = os.environ.get("MILVUS_COLLECTION", "memory_test_ci")
         self.milvus = MilvusVerifier(
             address=milvus_address, collection=milvus_collection
+        )
+
+    def create_conversation(self, api_type="response"):
+        """Create a conversation helper for the specified API type.
+
+        Args:
+            api_type: Either "response" for Response API or "chat" for Chat Completions
+
+        Returns:
+            ConversationHelper instance
+        """
+        return ConversationHelper(
+            api_type=api_type,
+            router_endpoint=self.router_endpoint,
+            timeout=self.timeout,
         )
 
     def send_memory_request(
@@ -366,6 +572,96 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
         wait_time = seconds or self.extraction_wait
         print(f"\n⏳ Waiting {wait_time}s for memory extraction...")
         time.sleep(wait_time)
+
+
+class UnifiedMemoryTest(MemoryFeaturesTest):
+    """Unified tests that run for both Response API and Chat Completions.
+
+    These tests use the ConversationHelper abstraction to test memory functionality
+    across both APIs with identical test logic.
+    """
+
+    def test_store_and_retrieve_both_apis(self):
+        """Test memory storage and retrieval for both Response API and Chat Completions."""
+        for api_type in ["response", "chat"]:
+            with self.subTest(api_type=api_type):
+                self.print_test_header(
+                    f"Store and Retrieve [{api_type.upper()}]",
+                    f"Test memory with {api_type} API: store fact → extract → retrieve",
+                )
+
+                # Create conversation helper
+                conv = self.create_conversation(api_type=api_type)
+                test_user = f"{self.test_user}_{api_type}"
+
+                # Turn 1: Store a fact (use known llm-katan keyword)
+                response1 = conv.send_message(
+                    "Please remember this: My favorite color is purple",
+                    user_id=test_user,
+                    verbose=True,
+                )
+                self.assertIsNotNone(response1, f"[{api_type}] Turn 1 failed")
+                print(f"   ✓ Turn 1: Fact stated")
+
+                # Turn 2: Continue conversation (triggers extraction of turn 1)
+                response2 = conv.send_message(
+                    "Got it, thanks for remembering that.",
+                    user_id=test_user,
+                    verbose=False,
+                )
+                self.assertIsNotNone(response2, f"[{api_type}] Turn 2 failed")
+                print(f"   ✓ Turn 2: Follow-up sent (triggers extraction)")
+
+                # Wait for async extraction + Milvus indexing
+                self.wait_for_extraction()
+
+                # Flush Milvus to ensure vectors are indexed and searchable
+                # Without this, the router's Retrieve may not find the memory
+                if self.milvus.is_available():
+                    self.milvus.flush()
+                    time.sleep(3)
+
+                # Verify memory in Milvus
+                if self.milvus.is_available():
+                    memories = self.milvus.search_memories(test_user, "purple")
+                    if memories:
+                        self.print_test_result(
+                            True,
+                            f"[{api_type}] Memory stored: found {len(memories)} memory(ies) with 'purple'",
+                        )
+                    else:
+                        count = self.milvus.count_memories(test_user)
+                        print(
+                            f"   ⚠️  [{api_type}] {count} memories for user but 'purple' not found"
+                        )
+                        if count == 0:
+                            self.fail(f"[{api_type}] Memory extraction failed")
+                else:
+                    print(f"   ⚠️  [{api_type}] Milvus verification skipped")
+
+                # Query in NEW session (tests memory retrieval, not conversation history)
+                conv_new = self.create_conversation(api_type=api_type)
+                response3 = conv_new.send_message(
+                    "What is my favorite color?", user_id=test_user, verbose=True
+                )
+                self.assertIsNotNone(response3, f"[{api_type}] Retrieval query failed")
+
+                # Check if memory was injected
+                response_lower = response3.lower()
+                has_purple = "purple" in response_lower
+
+                if has_purple:
+                    self.print_test_result(
+                        True, f"[{api_type}] Memory retrieved and injected successfully"
+                    )
+                else:
+                    self.print_test_result(
+                        False,
+                        f"[{api_type}] Memory NOT retrieved. Response: {response3[:200]}",
+                    )
+                    self.fail(f"[{api_type}] Memory not retrieved from Milvus")
+
+                print(f"\n✅ [{api_type.upper()}] API test passed\n")
 
 
 class MemoryRetrievalTest(MemoryFeaturesTest):
@@ -1808,6 +2104,7 @@ def run_tests():
         UserIsolationTest,
         PluginCombinationTest,  # Tests memory + system_prompt working together
         AccessTrackingTest,  # Tests access_count, last_accessed, Upsert integrity
+        UnifiedMemoryTest,  # Tests both Response API and Chat Completions memory
     ]
 
     for test_class in test_classes:

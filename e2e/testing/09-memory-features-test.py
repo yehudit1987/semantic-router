@@ -171,6 +171,83 @@ class MilvusVerifier:
 
         return []
 
+    def get_memory_metadata(
+        self, user_id: str, keyword: Optional[str] = None, max_retries: int = 3
+    ) -> Optional[Dict]:
+        """Get a memory's metadata for a user.
+
+        If keyword is provided, filters by keyword in content.
+        If keyword is None, returns the first (most recent) memory for the user.
+        Each test uses a unique user_id, so no keyword is needed for isolation.
+        """
+        if not self.client:
+            return None
+
+        for attempt in range(max_retries):
+            try:
+                self.flush()
+                if attempt > 0:
+                    time.sleep(2)
+
+                results = self.client.query(
+                    collection_name=self.collection,
+                    filter=f'user_id == "{user_id}"',
+                    output_fields=[
+                        "id",
+                        "content",
+                        "metadata",
+                        "access_count",
+                        "created_at",
+                        "updated_at",
+                    ],
+                )
+
+                # Filter by keyword if provided, otherwise use all results
+                candidates = results
+                if keyword:
+                    candidates = [
+                        r
+                        for r in results
+                        if keyword.lower() in r.get("content", "").lower()
+                    ]
+
+                for r in candidates:
+                    # Parse metadata JSON if it's a string
+                    meta_raw = r.get("metadata", "{}")
+                    if isinstance(meta_raw, str):
+                        try:
+                            r["_parsed_metadata"] = json.loads(meta_raw)
+                        except json.JSONDecodeError:
+                            r["_parsed_metadata"] = {}
+                    else:
+                        r["_parsed_metadata"] = meta_raw or {}
+                    return r
+
+                if not results and attempt < max_retries - 1:
+                    print(
+                        f"   ⏳ Milvus metadata attempt {attempt + 1}/{max_retries}: "
+                        f"no results for user, retrying..."
+                    )
+                    time.sleep(2)
+                    continue
+
+                if results and not candidates:
+                    print(
+                        f"   ⚠️  Found {len(results)} memories for user but "
+                        f"keyword '{keyword}' not in content. "
+                        f"Stored: {results[0].get('content', '')[:80]}..."
+                    )
+                return None
+
+            except Exception as e:
+                print(f"⚠️  Milvus metadata query failed (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return None
+
+        return None
+
     def is_available(self) -> bool:
         """Check if Milvus verification is available."""
         return self.client is not None
@@ -1325,6 +1402,313 @@ class PluginCombinationTest(MemoryFeaturesTest):
             )
 
 
+class AccessTrackingTest(MemoryFeaturesTest):
+    """Test that memory access tracking (access_count, last_accessed) works correctly.
+
+    Verifies the MemoryBank-style retention scoring infrastructure:
+    - access_count increments after each retrieval
+    - last_accessed updates to recent timestamp after retrieval
+    - Upsert preserves memory content and embedding (no data loss)
+    """
+
+    def test_01_access_count_increments_after_retrieval(self):
+        """Test that access_count in Milvus metadata increments after retrieving a memory."""
+        self.print_test_header(
+            "Access Count Increments After Retrieval",
+            "Store a fact, retrieve it, verify access_count > 0 in Milvus metadata",
+        )
+
+        if not self.milvus.is_available():
+            self.skipTest("Milvus not available for direct metadata verification")
+
+        # Step 1: Store a fact using echo backend keywords (unique user provides isolation)
+        result = self.send_memory_request(
+            message="Please remember this: my car is a blue Tesla Model 3 from 2023",
+            auto_store=True,
+        )
+        self.assertIsNotNone(result, "Failed to store fact")
+        first_response_id = result.get("id")
+
+        # Step 2: Follow-up to trigger extraction
+        self.send_memory_request(
+            message="Got it, good move.",
+            auto_store=True,
+            previous_response_id=first_response_id,
+            verbose=False,
+        )
+        print("   ✓ Fact stored, extraction triggered")
+        self.wait_for_extraction()
+
+        # Step 3: Verify initial state — find any memory for this unique test user
+        meta_before = self.milvus.get_memory_metadata(self.test_user)
+        if not meta_before:
+            self.fail("No memory found in Milvus after extraction")
+
+        parsed = meta_before.get("_parsed_metadata", {})
+        initial_count = parsed.get("access_count", 0)
+        print(
+            f"   ✓ Initial: access_count={initial_count}, "
+            f"content={meta_before.get('content', '')[:60]}..."
+        )
+
+        # Step 4: Retrieve the memory (triggers background access tracking)
+        result3 = self.send_memory_request(
+            message="What car do I drive?",
+            auto_store=False,
+        )
+        self.assertIsNotNone(result3, "Failed to retrieve")
+
+        # Step 5: Wait for background access tracking to complete
+        print("   ⏳ Waiting 8s for background access tracking (Upsert)...")
+        time.sleep(8)
+        self.milvus.flush()
+        time.sleep(2)
+
+        # Step 6: Verify access_count incremented
+        meta_after = self.milvus.get_memory_metadata(self.test_user)
+        if not meta_after:
+            self.fail("Memory disappeared after retrieval (Upsert may have lost data)")
+
+        parsed_after = meta_after.get("_parsed_metadata", {})
+        updated_count = parsed_after.get("access_count", 0)
+        print(f"   ✓ Updated access_count: {updated_count}")
+
+        if updated_count > initial_count:
+            self.print_test_result(
+                True,
+                f"access_count incremented: {initial_count} → {updated_count}",
+            )
+        else:
+            self.print_test_result(
+                False,
+                f"access_count did NOT increment: {initial_count} → {updated_count}",
+            )
+            self.fail(
+                f"access_count not updated: expected > {initial_count}, got {updated_count}"
+            )
+
+    def test_02_last_accessed_updates_after_retrieval(self):
+        """Test that last_accessed timestamp updates after retrieval."""
+        self.print_test_header(
+            "last_accessed Updates After Retrieval",
+            "Store fact, retrieve it, verify last_accessed is recent in Milvus",
+        )
+
+        if not self.milvus.is_available():
+            self.skipTest("Milvus not available for direct metadata verification")
+
+        # Step 1: Store a fact using echo backend keywords (unique user provides isolation)
+        result = self.send_memory_request(
+            message="Please remember this: my dog's name is Max and he is a golden retriever",
+            auto_store=True,
+        )
+        self.assertIsNotNone(result, "Failed to store fact")
+        first_response_id = result.get("id")
+
+        # Step 2: Follow-up to trigger extraction
+        self.send_memory_request(
+            message="Great strategy.",
+            auto_store=True,
+            previous_response_id=first_response_id,
+            verbose=False,
+        )
+        self.wait_for_extraction()
+
+        # Verify memory was extracted
+        meta_initial = self.milvus.get_memory_metadata(self.test_user)
+        if not meta_initial:
+            self.fail("No memory found in Milvus after extraction")
+        print(f"   ✓ Memory found: {meta_initial.get('content', '')[:60]}...")
+
+        # Step 3: Record time before retrieval
+        time_before_retrieve = int(time.time())
+
+        # Step 4: Retrieve the memory
+        self.send_memory_request(
+            message="What is my dog's name?",
+            auto_store=False,
+            verbose=False,
+        )
+
+        # Step 5: Wait for background tracking
+        print("   ⏳ Waiting 8s for background access tracking...")
+        time.sleep(8)
+        self.milvus.flush()
+        time.sleep(2)
+
+        # Step 6: Verify last_accessed is recent
+        meta = self.milvus.get_memory_metadata(self.test_user)
+        if not meta:
+            self.fail("Memory not found after retrieval")
+
+        parsed = meta.get("_parsed_metadata", {})
+        last_accessed = parsed.get("last_accessed", 0)
+        print(f"   last_accessed (unix): {last_accessed}")
+        print(f"   time before retrieve: {time_before_retrieve}")
+
+        # last_accessed should be at or after the time we triggered retrieval
+        # Allow 60s tolerance for clock skew or delayed processing
+        if last_accessed >= time_before_retrieve - 60:
+            self.print_test_result(
+                True,
+                "last_accessed is recent (within tolerance of retrieve time)",
+            )
+        else:
+            self.print_test_result(
+                False,
+                f"last_accessed is stale: {last_accessed} vs expected >= {time_before_retrieve - 60}",
+            )
+            self.fail("last_accessed not updated after retrieval")
+
+    def test_03_upsert_preserves_memory_content(self):
+        """Test that access tracking (Upsert) does not lose memory content or break retrieval."""
+        self.print_test_header(
+            "Upsert Preserves Memory Content",
+            "Store fact, retrieve twice, verify content is intact after Upsert",
+        )
+
+        if not self.milvus.is_available():
+            self.skipTest("Milvus not available for direct metadata verification")
+
+        # Step 1: Store a fact using echo backend keywords (unique user provides isolation)
+        result = self.send_memory_request(
+            message="Please remember this: my favorite color is purple",
+            auto_store=True,
+        )
+        self.assertIsNotNone(result, "Failed to store fact")
+        first_response_id = result.get("id")
+
+        # Step 2: Follow-up to trigger extraction
+        self.send_memory_request(
+            message="Nice opening.",
+            auto_store=True,
+            previous_response_id=first_response_id,
+            verbose=False,
+        )
+        self.wait_for_extraction()
+
+        # Verify memory exists and capture its content
+        meta_before = self.milvus.get_memory_metadata(self.test_user)
+        if not meta_before:
+            self.fail("No memory found in Milvus after extraction")
+        original_content = meta_before.get("content", "")
+        original_id = meta_before.get("id", "")
+        print(
+            f"   ✓ Memory stored: id={original_id[:20]}..., content={original_content[:60]}..."
+        )
+
+        # Step 3: First retrieval (triggers Upsert with access tracking)
+        result1 = self.send_memory_request(
+            message="What is my favorite color?",
+            auto_store=False,
+        )
+        self.assertIsNotNone(result1, "First retrieval failed")
+
+        # Wait for Upsert to complete
+        print("   ⏳ Waiting 8s for background Upsert...")
+        time.sleep(8)
+        self.milvus.flush()
+        time.sleep(2)
+
+        # Step 4: Verify memory still exists with same content after Upsert
+        meta_after = self.milvus.get_memory_metadata(self.test_user)
+        if not meta_after:
+            self.print_test_result(
+                False, "Memory LOST after Upsert! Not found in Milvus."
+            )
+            self.fail("Upsert caused data loss")
+
+        after_content = meta_after.get("content", "")
+        after_id = meta_after.get("id", "")
+        print(
+            f"   ✓ After Upsert: id={after_id[:20]}..., content={after_content[:60]}..."
+        )
+
+        # Verify content is preserved (same id, same content)
+        if after_id == original_id and after_content == original_content:
+            self.print_test_result(
+                True,
+                "Memory content and ID intact after Upsert",
+            )
+        elif after_content == original_content:
+            self.print_test_result(
+                True,
+                "Memory content intact after Upsert (ID may differ due to re-insert)",
+            )
+        else:
+            self.print_test_result(
+                False,
+                f"Content changed! Before: {original_content[:50]}... After: {after_content[:50]}...",
+            )
+            self.fail("Upsert modified memory content")
+
+    def test_04_multiple_retrievals_increment_count(self):
+        """Test that multiple retrievals keep incrementing access_count."""
+        self.print_test_header(
+            "Multiple Retrievals Increment Count",
+            "Retrieve same memory 3 times, verify access_count >= 2",
+        )
+
+        if not self.milvus.is_available():
+            self.skipTest("Milvus not available for direct metadata verification")
+
+        # Step 1: Store a fact using echo backend keywords (unique user provides isolation)
+        result = self.send_memory_request(
+            message="Please remember this: my secret project codename is Phoenix-2026",
+            auto_store=True,
+        )
+        self.assertIsNotNone(result, "Failed to store fact")
+        first_response_id = result.get("id")
+
+        self.send_memory_request(
+            message="Good tactic.",
+            auto_store=True,
+            previous_response_id=first_response_id,
+            verbose=False,
+        )
+        self.wait_for_extraction()
+
+        # Verify memory exists
+        meta_initial = self.milvus.get_memory_metadata(self.test_user)
+        if not meta_initial:
+            self.fail("No memory found in Milvus after extraction")
+        print(f"   ✓ Memory found: {meta_initial.get('content', '')[:60]}...")
+
+        # Step 2: Retrieve 3 times with waits for background processing
+        for i in range(3):
+            self.send_memory_request(
+                message="What is my project codename?",
+                auto_store=False,
+                verbose=False,
+            )
+            print(f"   ✓ Retrieval {i + 1}/3")
+            time.sleep(5)  # Wait for background Upsert
+
+        # Step 3: Flush and verify
+        self.milvus.flush()
+        time.sleep(2)
+
+        meta = self.milvus.get_memory_metadata(self.test_user)
+        if not meta:
+            self.fail("Memory not found after multiple retrievals")
+
+        parsed = meta.get("_parsed_metadata", {})
+        final_count = parsed.get("access_count", 0)
+        print(f"   Final access_count: {final_count}")
+
+        if final_count >= 2:
+            self.print_test_result(
+                True,
+                f"access_count = {final_count} after 3 retrievals (some may merge concurrently)",
+            )
+        else:
+            self.print_test_result(
+                False,
+                f"access_count = {final_count}, expected >= 2 after 3 retrievals",
+            )
+            self.fail(f"access_count too low: {final_count}")
+
+
 def run_tests():
     """Run all memory feature tests with detailed output."""
     print("\n" + "=" * 60)
@@ -1361,6 +1745,7 @@ def run_tests():
         MemoryExtractionTest,
         UserIsolationTest,
         PluginCombinationTest,  # Tests memory + system_prompt working together
+        AccessTrackingTest,  # Tests access_count, last_accessed, Upsert integrity
     ]
 
     for test_class in test_classes:

@@ -162,6 +162,17 @@ const (
 	VerificationContextMissing = "x-vsr-verification-context-missing"
 )
 
+// Auth Backend Injected Headers
+// These headers are set by the external authorization service (Authorino, Envoy Gateway JWT,
+// oauth2-proxy, etc.) after successful user authentication.
+// They carry authenticated user identity for secure per-user operations (e.g., memory isolation).
+const (
+	// AuthzUserID is the header carrying the authenticated user's identity.
+	// Injected by the auth backend (e.g., Authorino reads K8s Secret metadata.name).
+	// Used by memory operations to securely identify users without trusting client metadata.
+	AuthzUserID = "x-authz-user-id"
+)
+
 // Looper Request Headers
 // These headers are added to looper internal requests to identify them
 // and allow the extproc to lookup decision configuration and apply plugins.

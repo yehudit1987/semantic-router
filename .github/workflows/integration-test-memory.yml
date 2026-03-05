@@ -1,6 +1,9 @@
 name: Integration Test [Memory]
 description: Integration tests for memory features with Milvus storage backend
 on:
+  push:
+    branches:
+      - per-decision-memory-tests
   pull_request:
     branches:
       - main
@@ -118,6 +121,8 @@ jobs:
           file: src/vllm-sr/Dockerfile
           tags: vllm-sr:ci
           load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start vllm-sr serve
         run: |

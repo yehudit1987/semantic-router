@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """
-Memory Features E2E Test Suite — Risk-Based, Milvus-First
+Memory Features E2E Test Suite — Milvus-First
 
-Organized by priority derived from risk/return analysis (see ISSUE_1293_REVIEW.md):
+The memory pipeline is direct per-turn storage: each response triggers
+"Q: {user_msg}\\nA: {assistant_response}" chunk storage in Milvus (no LLM
+extraction call). Session chunks are stored every 3 turns (window size 5).
 
-  P0 Security:
-    - UserIsolationTest: Cross-user memory leak (MINJA/InjecMEM attack surface)
-
-  P1 Pipeline Correctness:
-    - MemoryInjectionPipelineTest: The fundamental store -> extract -> inject contract
-    - MemoryContentIntegrityTest: Content preserved in Milvus (no truncation/corruption)
-    - SimilarityThresholdTest: Irrelevant NOT injected, relevant IS injected
-    - StaleMemoryTest: Contradicting facts baseline (soft-insert, no contradiction detection)
-    - PluginCombinationTest: Memory + system_prompt coexistence
-    - MemoryExtractionTest: Facts extracted from conversation turns
-
-  P2 Operational:
-    - ExtractionTriggerTest: Extraction fires on correct turn boundary
+Test classes:
+  - UserIsolationTest: Cross-user memory leak prevention
+  - MemoryInjectionPipelineTest: The fundamental store -> inject contract
+  - MemoryContentIntegrityTest: Content preserved in Milvus (no truncation/corruption)
+  - SimilarityThresholdTest: Irrelevant NOT injected, relevant IS injected
+  - StaleMemoryTest: Contradicting facts baseline (soft-insert, no contradiction detection)
+  - PluginCombinationTest: Memory + system_prompt coexistence
+  - MemoryStorageTest: Conversation turns stored in Milvus
 
 Design principles:
-  1. Milvus-first verification — storage/extraction checks verify directly in Milvus
+  1. Milvus-first verification — storage checks verify directly in Milvus
      via MilvusVerifier, not by parsing echo responses. Echo check is only for injection.
   2. No assertions on unimplemented features — dedup, contradiction detection, and
      access tracking (Ebbinghaus scoring) are not implemented. We document current
@@ -32,9 +29,6 @@ Prerequisites:
   - Milvus running
   - Semantic Router running with memory enabled
   - LLM backend with ECHO mode for reliable verification
-  - extraction_batch_size: Must be 1 (not 0!) in config. The code treats 0 as
-    "use default (10)". With batchSize=1: turnCount%1=0, so extraction happens
-    after every turn.
 
 To start llm-katan with echo backend:
     LLM_KATAN_BACKEND=echo ./start-llm-katan.sh
@@ -274,9 +268,9 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
         # Test user for this suite
         self.test_user = f"memory_features_test_{int(time.time())}"
 
-        # Memory extraction wait time (needs time for extraction + Milvus flush + segment load)
-        # Increased from 6 to 10 seconds - Milvus standalone needs time for new segments
-        self.extraction_wait = 10
+        # Storage wait time (embedding + Milvus flush + segment load)
+        # Milvus standalone needs time for new segments to become searchable
+        self.storage_wait = 10
 
         # Milvus verifier for direct storage verification
         milvus_address = os.environ.get("MILVUS_ADDRESS", "localhost:19530")
@@ -307,7 +301,7 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
             "metadata": {"user_id": user},
         }
 
-        # Chain conversation for memory extraction
+        # Chain conversation for multi-turn memory storage
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
 
@@ -368,10 +362,10 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
 
         return ""
 
-    def wait_for_extraction(self, seconds: int = None):
-        """Wait for memory extraction to complete."""
-        wait_time = seconds or self.extraction_wait
-        print(f"\n⏳ Waiting {wait_time}s for memory extraction...")
+    def wait_for_storage(self, seconds: int = None):
+        """Wait for memory storage (embedding + Milvus flush) to complete."""
+        wait_time = seconds or self.storage_wait
+        print(f"\n⏳ Waiting {wait_time}s for memory storage...")
         time.sleep(wait_time)
 
     def flush_and_wait(self, wait_seconds: int = 5):
@@ -411,18 +405,19 @@ class MemoryFeaturesTest(SemanticRouterTestBase):
 
 
 class MemoryInjectionPipelineTest(MemoryFeaturesTest):
-    """Test the fundamental memory contract: store -> extract -> inject into prompt.
+    """Test the fundamental memory contract: store -> inject into prompt.
 
+    Storage happens on every turn (direct per-turn chunk, no LLM call).
     Uses the echo backend to verify that stored memories appear in the prompt
     sent to the LLM. All retrieval checks are done in a NEW session (no
     previous_response_id) so keywords can only come from Milvus injection.
     """
 
-    def test_01_store_extract_inject(self):
-        """The fundamental pipeline: store a fact, trigger extraction, verify injection."""
+    def test_01_store_and_inject(self):
+        """The fundamental pipeline: store a fact, verify injection in a new session."""
         self.print_test_header(
-            "Store -> Extract -> Inject Pipeline",
-            "Store a fact, trigger extraction, query in NEW session, verify injection via echo",
+            "Store -> Inject Pipeline",
+            "Store a fact, query in NEW session, verify injection via echo",
         )
 
         fact = "My car is a blue Tesla Model 3 from 2023"
@@ -432,18 +427,9 @@ class MemoryInjectionPipelineTest(MemoryFeaturesTest):
         self.assertIsNotNone(result1, "Failed to store fact")
         self.assertEqual(result1.get("status"), "completed")
         first_response_id = result1.get("id")
-        print(f"   Turn 1: Fact stored (response_id: {first_response_id[:20]}...)")
+        print(f"   Fact stored (response_id: {first_response_id[:20]}...)")
 
-        result2 = self.send_memory_request(
-            message="Got it, thanks for remembering that.",
-            auto_store=True,
-            previous_response_id=first_response_id,
-            verbose=False,
-        )
-        self.assertIsNotNone(result2, "Failed to send follow-up")
-        print("   Turn 2: Follow-up sent (triggers extraction)")
-
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         if self.milvus.is_available():
             memories = self.milvus.search_memories(self.test_user, "tesla")
@@ -454,7 +440,7 @@ class MemoryInjectionPipelineTest(MemoryFeaturesTest):
             else:
                 count = self.milvus.count_memories(self.test_user)
                 self.fail(
-                    f"Extraction failed: {count} memories in Milvus but none contain 'tesla'"
+                    f"Storage failed: {count} memories in Milvus but none contain 'tesla'"
                 )
 
         self.flush_and_wait(8)
@@ -480,7 +466,7 @@ class MemoryInjectionPipelineTest(MemoryFeaturesTest):
 
 
 class MemoryContentIntegrityTest(MemoryFeaturesTest):
-    """Verify the extractor preserves content correctly in Milvus.
+    """Verify per-turn storage preserves content correctly in Milvus.
 
     Checks that structured content (numbers, proper nouns, dates) survives
     the formatTurnChunk path in extractor.go without truncation or corruption.
@@ -514,9 +500,9 @@ class MemoryContentIntegrityTest(MemoryFeaturesTest):
             verbose=False,
         )
         self.assertIsNotNone(result2, "Failed to send follow-up")
-        print("   Extraction triggered")
+        print("   Follow-up stored")
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         count = self.milvus.count_memories(self.test_user)
         self.assertGreater(count, 0, "No memories stored in Milvus")
@@ -582,7 +568,7 @@ class SimilarityThresholdTest(MemoryFeaturesTest):
             verbose=False,
         )
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         all_results = self.milvus.client.query(
             collection_name=self.milvus.collection,
@@ -608,7 +594,7 @@ class SimilarityThresholdTest(MemoryFeaturesTest):
             self.print_test_result(
                 True,
                 "Memory stored but 'italian/restaurant' not in content field "
-                "(extractor may have paraphrased). No contamination detected.",
+                "(turn chunk may have been formatted differently). No contamination detected.",
             )
         else:
             self.print_test_result(
@@ -637,7 +623,7 @@ class SimilarityThresholdTest(MemoryFeaturesTest):
             verbose=False,
         )
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
         self.flush_and_wait(8)
 
         output, found = self.query_with_retry(
@@ -700,9 +686,9 @@ class StaleMemoryTest(MemoryFeaturesTest):
             previous_response_id=second_response_id,
             verbose=False,
         )
-        print("   Extraction triggered for all turns")
+        print("   All turns stored")
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         all_results = self.milvus.client.query(
             collection_name=self.milvus.collection,
@@ -749,12 +735,11 @@ class UserIsolationTest(MemoryFeaturesTest):
         self.user_b_secret = "My password is hunter2"
 
     def test_01_store_user_a_memory(self):
-        """Store a secret for User A using 2-turn pattern for extraction."""
+        """Store a secret for User A."""
         self.print_test_header(
             "Store User A Secret", f"Storing: '{self.user_a_secret}'"
         )
 
-        # Turn 1: Store the secret
         result = self.send_memory_request(
             message=f"Remember this: {self.user_a_secret}",
             auto_store=True,
@@ -764,9 +749,9 @@ class UserIsolationTest(MemoryFeaturesTest):
         self.assertIsNotNone(result, "Failed to store User A memory")
         self.assertEqual(result.get("status"), "completed")
         first_response_id = result.get("id")
-        print(f"   ✓ Turn 1: Secret stored (response_id: {first_response_id[:20]}...)")
+        print(f"   ✓ Secret stored (response_id: {first_response_id[:20]}...)")
 
-        # Turn 2: Follow-up to trigger extraction
+        # Follow-up turn (also stored)
         result2 = self.send_memory_request(
             message="Got it, I'll keep that safe.",
             auto_store=True,
@@ -775,11 +760,11 @@ class UserIsolationTest(MemoryFeaturesTest):
             verbose=False,
         )
         self.assertIsNotNone(result2, "Failed to send follow-up")
-        print("   ✓ Turn 2: Follow-up sent (triggers extraction)")
+        print("   ✓ Follow-up stored")
 
-        self.print_test_result(True, "User A secret stored with extraction triggered")
+        self.print_test_result(True, "User A secret stored")
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
     def test_02_user_b_cannot_see_user_a_secret(self):
         """Security: User B should NOT see User A's secret."""
@@ -788,7 +773,6 @@ class UserIsolationTest(MemoryFeaturesTest):
             "User B should NOT see User A's PIN",
         )
 
-        # First store User A's memory with 2-turn pattern
         result1 = self.send_memory_request(
             message=f"Remember this: {self.user_a_secret}",
             auto_store=True,
@@ -797,7 +781,6 @@ class UserIsolationTest(MemoryFeaturesTest):
         )
         first_response_id = result1.get("id") if result1 else None
 
-        # Turn 2: Follow-up to trigger extraction
         if first_response_id:
             self.send_memory_request(
                 message="That's my secret PIN.",
@@ -806,9 +789,9 @@ class UserIsolationTest(MemoryFeaturesTest):
                 previous_response_id=first_response_id,
                 verbose=False,
             )
-            print("   ✓ User A's secret stored with extraction triggered")
+            print("   ✓ User A's secret stored")
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         # User B tries to access
         result = self.send_memory_request(
@@ -837,7 +820,6 @@ class UserIsolationTest(MemoryFeaturesTest):
             "User A Queries Own Memory", "User A should see their own PIN from Milvus"
         )
 
-        # First store User A's memory with 2-turn pattern
         store_result = self.send_memory_request(
             message=f"Remember this: {self.user_a_secret}",
             auto_store=True,
@@ -847,7 +829,6 @@ class UserIsolationTest(MemoryFeaturesTest):
         self.assertIsNotNone(store_result, "Failed to store User A secret")
         first_response_id = store_result.get("id")
 
-        # Turn 2: Follow-up to trigger extraction
         result2 = self.send_memory_request(
             message="That's my secret PIN.",
             auto_store=True,
@@ -855,9 +836,9 @@ class UserIsolationTest(MemoryFeaturesTest):
             previous_response_id=first_response_id,
             verbose=False,
         )
-        print("   ✓ User A's secret stored with extraction triggered")
+        print("   ✓ User A's secret stored")
 
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         # User A queries their own memory in NEW SESSION (no previous_response_id)
         # This tests that User A can retrieve their own memory from Milvus
@@ -890,7 +871,7 @@ class UserIsolationTest(MemoryFeaturesTest):
             "Neither user should see the other's secrets from Milvus",
         )
 
-        # Store secrets for both users with 2-turn pattern each
+        # Store secrets for both users
         # User A: Turn 1
         result_a1 = self.send_memory_request(
             message=f"Remember: {self.user_a_secret}",
@@ -909,7 +890,7 @@ class UserIsolationTest(MemoryFeaturesTest):
         )
         response_id_b = result_b1.get("id") if result_b1 else None
 
-        # User A: Turn 2 (triggers extraction)
+        # User A: Turn 2
         if response_id_a:
             self.send_memory_request(
                 message="That's my secret PIN.",
@@ -919,7 +900,7 @@ class UserIsolationTest(MemoryFeaturesTest):
                 verbose=False,
             )
 
-        # User B: Turn 2 (triggers extraction)
+        # User B: Turn 2
         if response_id_b:
             self.send_memory_request(
                 message="That's my password.",
@@ -929,9 +910,9 @@ class UserIsolationTest(MemoryFeaturesTest):
                 verbose=False,
             )
 
-        print("   ✓ Both users' secrets stored with extraction triggered")
+        print("   ✓ Both users' secrets stored")
 
-        self.wait_for_extraction(3)
+        self.wait_for_storage(3)
 
         # Verify isolation at Milvus storage level
         if self.milvus.is_available():
@@ -992,17 +973,16 @@ class UserIsolationTest(MemoryFeaturesTest):
         )
 
 
-class MemoryExtractionTest(MemoryFeaturesTest):
-    """Test memory extraction from natural conversation."""
+class MemoryStorageTest(MemoryFeaturesTest):
+    """Test per-turn memory storage from natural conversation."""
 
-    def test_01_extract_facts_from_conversation(self):
-        """Test that facts are extracted from natural conversation and stored in Milvus."""
+    def test_01_store_turns_from_conversation(self):
+        """Test that conversation turns are stored in Milvus and retrievable."""
         self.print_test_header(
-            "Extract Facts from Conversation",
+            "Store Turns from Conversation",
             "Natural conversation, query in NEW sessions to verify Milvus storage",
         )
 
-        # Natural conversation (not explicit "remember this") - turn 1
         conversation_message = """
         I had a great day today! Had lunch with my brother Tom at the new sushi place
         downtown. He told me he's getting married next spring to his girlfriend Anna.
@@ -1012,30 +992,20 @@ class MemoryExtractionTest(MemoryFeaturesTest):
 
         result = self.send_memory_request(message=conversation_message, auto_store=True)
         self.assertIsNotNone(result, "Failed to process conversation")
-        first_response_id = result.get("id")
 
-        # Send follow-up to trigger extraction (turn 2)
-        result2 = self.send_memory_request(
-            message="What a great day it was!",
-            auto_store=True,
-            previous_response_id=first_response_id,
-            verbose=False,
-        )
-        print("   ✓ Follow-up sent (triggers extraction)")
-
-        self.wait_for_extraction()
+        self.wait_for_storage()
 
         if self.milvus.is_available():
             count = self.milvus.count_memories(self.test_user)
             if count > 0:
-                print(f"   ✓ Extraction stored {count} memories in Milvus")
+                print(f"   ✓ Stored {count} memories in Milvus")
                 for keyword in ["tom", "anna", "macbook"]:
                     memories = self.milvus.search_memories(self.test_user, keyword)
                     if memories:
                         print(f"   ✓ Found '{keyword}' in Milvus")
             else:
-                self.print_test_result(False, "No facts extracted to Milvus")
-                self.fail("Memory extraction failed: no memories stored")
+                self.print_test_result(False, "No turns stored in Milvus")
+                self.fail("Memory storage failed: no memories stored")
         else:
             print("   ⚠️  Milvus verification skipped (not available)")
 
@@ -1062,11 +1032,11 @@ class MemoryExtractionTest(MemoryFeaturesTest):
         if successful_queries >= 1:
             self.print_test_result(
                 True,
-                f"Extracted and retrieved {successful_queries}/3 facts from Milvus",
+                f"Stored and retrieved {successful_queries}/3 turns from Milvus",
             )
         else:
-            self.print_test_result(False, "No facts extracted or retrieved from Milvus")
-            self.fail("Memory extraction failed: no facts found in Milvus")
+            self.print_test_result(False, "No turns stored or retrieved from Milvus")
+            self.fail("Memory storage failed: no turns found in Milvus")
 
 
 class PluginCombinationTest(MemoryFeaturesTest):
@@ -1099,8 +1069,8 @@ class PluginCombinationTest(MemoryFeaturesTest):
             f"   Turn 1: Stored (response_id: {first_response_id[:20] if first_response_id else 'N/A'}...)"
         )
 
-        # Step 2: Send follow-up to trigger extraction (turn 2 extracts turn 1)
-        print(f"\n📝 Step 2: Sending follow-up to trigger extraction...")
+        # Step 2: Send follow-up (also stored as a per-turn chunk)
+        print(f"\n📝 Step 2: Sending follow-up...")
         result2 = self.send_memory_request(
             message="Got it, I'll remember that code.",
             auto_store=True,
@@ -1109,11 +1079,11 @@ class PluginCombinationTest(MemoryFeaturesTest):
         )
         if not result2:
             self.fail("Failed to send follow-up")
-        print("   Turn 2: Follow-up sent (triggers extraction)")
+        print("   Turn 2: Follow-up stored")
 
-        # Step 3: Wait for extraction to complete
-        print(f"\n⏳ Step 3: Waiting for memory extraction...")
-        time.sleep(self.extraction_wait + 1)
+        # Step 3: Wait for storage to complete
+        print(f"\n⏳ Step 3: Waiting for memory storage...")
+        time.sleep(self.storage_wait + 1)
 
         # Step 4: Query for the fact in NEW SESSION (no previous_response_id)
         # This is critical - it ensures we're testing Milvus retrieval, not conversation history
@@ -1185,72 +1155,6 @@ class PluginCombinationTest(MemoryFeaturesTest):
             )
 
 
-class ExtractionTriggerTest(MemoryFeaturesTest):
-    """Verify extraction fires on the correct turn boundary.
-
-    With extraction_batch_size=1, extraction should happen after every turn
-    (turnCount % 1 == 0). This test verifies that turn 2 triggers extraction
-    of turn 1's content into Milvus.
-    """
-
-    def test_01_extraction_after_second_turn(self):
-        """Verify that a 2-turn conversation results in extracted memory in Milvus."""
-        self.print_test_header(
-            "Extraction Trigger on Turn Boundary",
-            "Send 2 chained turns, verify extraction produced a memory in Milvus",
-        )
-
-        if not self.milvus.is_available():
-            self.skipTest("Milvus not available for direct verification")
-
-        unique_marker = f"XTRG-{int(time.time())}"
-        result1 = self.send_memory_request(
-            message=f"Please remember this: my verification code is {unique_marker}",
-            auto_store=True,
-        )
-        self.assertIsNotNone(result1, "Failed to store turn 1")
-        first_response_id = result1.get("id")
-        print(f"   Turn 1 sent (marker: {unique_marker})")
-
-        count_after_t1 = self.milvus.count_memories(self.test_user)
-        print(f"   Milvus memories after turn 1 (before extraction): {count_after_t1}")
-
-        result2 = self.send_memory_request(
-            message="Thanks for noting that code.",
-            auto_store=True,
-            previous_response_id=first_response_id,
-            verbose=False,
-        )
-        self.assertIsNotNone(result2, "Failed to store turn 2")
-        print("   Turn 2 sent (should trigger extraction of turn 1)")
-
-        self.wait_for_extraction()
-
-        count_after_t2 = self.milvus.count_memories(self.test_user)
-        print(f"   Milvus memories after turn 2 + wait: {count_after_t2}")
-
-        if count_after_t2 > count_after_t1:
-            memories = self.milvus.search_memories(self.test_user, unique_marker)
-            if memories:
-                self.print_test_result(
-                    True,
-                    f"Extraction triggered: {count_after_t2} memories, "
-                    f"marker '{unique_marker}' found in Milvus",
-                )
-            else:
-                self.print_test_result(
-                    True,
-                    f"Extraction triggered: {count_after_t2} memories stored "
-                    f"(marker not in content field but memories were created)",
-                )
-        else:
-            self.print_test_result(
-                False,
-                f"No new memories after turn 2. Before: {count_after_t1}, after: {count_after_t2}",
-            )
-            self.fail("Extraction did not fire after turn 2")
-
-
 def run_tests():
     """Run all memory feature tests with detailed output."""
     print("\n" + "=" * 60)
@@ -1287,9 +1191,7 @@ def run_tests():
         SimilarityThresholdTest,
         StaleMemoryTest,
         PluginCombinationTest,
-        MemoryExtractionTest,
-        # P2: Operational
-        ExtractionTriggerTest,
+        MemoryStorageTest,
     ]
 
     for test_class in test_classes:

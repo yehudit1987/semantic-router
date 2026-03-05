@@ -118,6 +118,8 @@ jobs:
           file: src/vllm-sr/Dockerfile
           tags: vllm-sr:ci
           load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start vllm-sr serve
         run: |
